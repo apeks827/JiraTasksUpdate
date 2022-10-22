@@ -15,6 +15,7 @@ print(var)
 
 comments = jira.issue('SD911-2088745', fields='comment')
 print(comments.raw['fields']['comment'])
-
+comm=issue.raw['fields']['comment']['comments']
+# comments = jira.comments(issues[index])
 # check_comments = jira.comments(issue)
 # print(check_comments)
