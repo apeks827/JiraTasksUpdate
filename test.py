@@ -37,7 +37,7 @@ def loop():
             if not new_issues:
                 cnt += 1
                 print("Yay! No new issues!")
-            print(cnt, new_issues)
+            print("-------------------------------------------------------------------------------")
 
             for issue in new_issues:
                 issue_creator = issue.raw['fields']['creator']['name']
@@ -192,6 +192,7 @@ def search_updates_timeout():
             new_issues = jira.search_issues('updatedDate >= -6m and key in watchedIssues() AND status != Обработано')
             if not new_issues:
                 print("No new updates!")
+            print("-------------------------------------------------------------------------------")
 
             for issue in new_issues:
                 issue_creator = issue.raw['fields']['creator']['name']
