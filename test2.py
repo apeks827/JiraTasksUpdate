@@ -6,16 +6,29 @@ jira = JIRA(
     token_auth=secrets.api  # Self-Hosted Jira (e.g. Server): the PAT token
     # auth=("admin", "admin"),  # a username/password tuple for cookie auth [Not recommended]
 )
-issue = jira.issue('SD911-2088745')
+
+
+# def issues_on_me(message):
+#     oh_crap = jira.search_issues('status in ("Ожидает обработки", "Повторно открыта", "Ожидает разработки", Уточнено, '
+#                                  '"В работе", Согласовано) AND assignee in (currentUser())')
+#
+#     for issue in oh_crap:
+#         print(f'got issue {issue}')
+#         print('try to send...')
+#         send_issues_on_me(message, issue)
+
+
+
+# issue = jira.issue('SD911-2088745')
 # print(jira.transitions(issue))
 # print(issue.fields.status)
-
-var = issue.raw['fields']['comment']
-print(var)
-
-comments = jira.issue('SD911-2088745', fields='comment')
-print(comments.raw['fields']['comment'])
-comm=issue.raw['fields']['comment']['comments']
+#
+# var = issue.raw['fields']['comment']
+# print(var)
+#
+# comments = jira.issue('SD911-2088745', fields='comment')
+# print(comments.raw['fields']['comment'])
+# comm=issue.raw['fields']['comment']['comments']
 # comments = jira.comments(issues[index])
 # check_comments = jira.comments(issue)
 # print(check_comments)
