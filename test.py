@@ -28,14 +28,15 @@ def loop():
     try:
         cnt = 0
         while True:
-            print("Start searching new issues...")
             time.sleep(10)
+            print("Start searching new issues...")
             # Search issues
             new_issues = jira.search_issues(
                 'project = SD911 AND status = "Ожидает обработки" AND assignee in (EMPTY) AND "Группа '
                 'исполнителей" = TS_TMB_team')
             if not new_issues:
                 cnt += 1
+                print("Yay! No new issues!")
             print(cnt, new_issues)
 
             for issue in new_issues:
@@ -185,14 +186,12 @@ def search_updates_timeout():
         return
 
     try:
-        cnt = 0
         while True:
-            print("Start searching updates...")
             time.sleep(300)
+            print("Start searching updates...")
             new_issues = jira.search_issues('updatedDate >= -6m and key in watchedIssues() AND status != Обработано')
             if not new_issues:
                 print("No new updates!")
-            print(cnt, new_issues)
 
             for issue in new_issues:
                 issue_creator = issue.raw['fields']['creator']['name']
