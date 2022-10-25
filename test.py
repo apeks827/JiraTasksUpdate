@@ -152,7 +152,6 @@ def got_message(message):
 
     elif message.text == "reserved":
         bot.send_message(message.chat.id, '_', reply_markup=types.ReplyKeyboardRemove())
-        pass
 
     elif message.text == "Updates":
         issues = search_updates()
