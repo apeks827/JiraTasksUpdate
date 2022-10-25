@@ -41,7 +41,7 @@ def loop():
 
             for issue in new_issues:
                 issue_creator = issue.raw['fields']['creator']['name']
-                issue_name = issue.raw['fields']['summary']
+                issue_name = issue.raw['fields']['summary'] # issue name like "проблема с пк"
                 check_comments = issue.raw['fields']['comment']['comments']  # comments from issue
                 print("Issue is: ", issue)  # issue ID
                 print("Check comments is: ", check_comments)
@@ -107,7 +107,8 @@ my_id = 105517177
 
 def send_message(issue, creator, name):
     answer = hlink(f'{issue}: {name}', f'https://jira.ozon.ru/browse/{issue}')
-    bot.send_message(my_id, f'Hi! There is a new issue: {answer} from {creator}', parse_mode='HTML')
+    bot.send_message(my_id, f'Hi! There is a new issue: {answer} from:', parse_mode='HTML')
+    bot.send_message(my_id, f'{creator}')
 
 
 def send_message_updates(issue, creator, name):
