@@ -42,11 +42,13 @@ def loop():
             for issue in new_issues:
                 issue_creator = issue.raw['fields']['creator']['name']
                 issue_name = issue.raw['fields']['summary']
-                print("Issue is: ", issue)  # issue ID
                 check_comments = issue.raw['fields']['comment']['comments']  # comments from issue
+                print("Issue is: ", issue)  # issue ID
                 print("Check comments is: ", check_comments)
                 # check comments
-                if "Suvorinov Ivan Vladimirovich" in check_comments or "Pechenin Aleksandr Sergeevich" in check_comments or "Ivashov Vladimir Aleksandrovich" in check_comments or "Smolenskiy Aleksey Yuryevich" in check_comments or "Titov Oleg Olegovich" in check_comments:
+                if ("Suvorinov Ivan Vladimirovich", "Pechenin Aleksandr Sergeevich", "Ivashov Vladimir Aleksandrovich",
+                    "Smolenskiy Aleksey Yuryevich",
+                    "Titov Oleg Olegovich") in check_comments or ("пропуск", "скуд") in issue_name.lower:
                     pass
                 else:
                     try:
@@ -59,10 +61,10 @@ def loop():
                         # transition to status "В работе"
                         jira.transition_issue(issue, '21')
                     except Exception as err:
-                        print(err)
+                        print("Err change status: ", err)
 
     except Exception as err:
-        print(err)
+        print("Failure to check new issues: ", err)
         Timer(15, loop).start()
 
 
