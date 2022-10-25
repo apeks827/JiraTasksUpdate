@@ -151,8 +151,7 @@ def got_message(message):
             bot.send_message(my_id, text='Issues on me:', reply_markup=keyboard)
 
     elif message.text == "reserved":
-        # def close_keyboard(bot, update):
-        #     bot.send_message(my_id, text='Issues on me:', reply_markup=ReplyKeyboardRemove())
+        bot.send_message(message.chat.id, '_', reply_markup=types.ReplyKeyboardRemove())
         pass
 
     elif message.text == "Updates":
