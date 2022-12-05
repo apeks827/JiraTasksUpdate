@@ -9,13 +9,15 @@ from telebot import types
 
 from dist import secrets
 
-jira = JIRA(
-    server="https://jira.o3.ru",
-    token_auth=secrets.api
-)
+# Main
 
-# Who has authenticated
-myself = jira.myself()
+variable = True
+to_assign = 1
+
+
+def start_stop(var):
+    global variable
+    variable = var
 
 
 def loop():
@@ -26,7 +28,9 @@ def loop():
         return
 
     try:
+        global to_assign
         while True:
+            flag = -1
             time.sleep(10)
             print("Start searching new issues...")
             # Search issues
@@ -35,44 +39,113 @@ def loop():
                 'исполнителей" = TS_TMB_team')
             if not new_issues:
                 print("Yay! No new issues!")
-
+            # check start/stop
+            if not variable:
+                print("Search new issues closed")
+                print("-------------------------------------------------------------------------------")
+                break
             for issue in new_issues:
                 issue_creator = issue.raw['fields']['creator']['name']
                 issue_name = issue.raw['fields']['summary']  # issue name like "проблема с пк"
                 check_comments = issue.raw['fields']['comment']['comments']  # comments from issue
+                comments = ''.join(map(str, check_comments))
                 print("Issue is: ", issue)  # issue ID
-                print("Check comments is: ", check_comments)
                 print("Check skud is: ", issue_name)
-                try:
-                    print("try to lower", issue_name.lower())
-                except Exception as err:
-                    print("Failed to convert RAW to str: ", err)
                 # check comments
-                time.sleep(1)
-                if "Suvorinov Ivan Vladimirovich" in check_comments or "Pechenin Aleksandr Sergeevich" in check_comments or "Ivashov Vladimir Aleksandrovich" in check_comments or "Smolenskiy Aleksey Yuryevich" in check_comments or "Titov Oleg Olegovich" in check_comments or "пропуск" in issue_name or "скуд" in issue_name or "СКУД" in issue_name or "Пропуск" in issue_name or "vivashov" in issue_creator or "ivsuvorinov" in issue_creator or "otitov" in issue_creator:
-                    print(f"Skip {issue} by conditions")
-                    pass
+                # print("Check comments is: ", check_comments)
+                # print(type(comments))
+                names = ["isuvorinov", "alpechenin", "vivashov", "asmolensky", "otitov"]
+                for name in names:
+                    if name in comments:
+                        print(f"Skip {issue} by comments conditions")
+                        flag = 0
+                if "пропуск" in issue_name.lower() or "скуд" in issue_name.lower() or "vivashov" in issue_creator or "ivsuvorinov" in issue_creator or "otitov" in issue_creator or "возврат" in issue_name.lower():
+                    print(f"Skip {issue} by conditions by issue_name or creator_name")
+                    flag = 0
 
-                else:
+                if flag == -1:
+                    #                         # got_err(err.__class__)
                     try:
-                        send_message(issue, issue_creator, issue_name)
-                    except Exception as err:
-                        print(err)
-#                         # got_err(err.__class__)
-                    try:
+                        if to_assign == 0:
+                            jira.transition_issue(issue, '21')
+                            assignee = issue.raw['fields']['assignee']
+                            print(f"Assigned to {assignee}")
+                            try:
+                                send_message(my_id, issue, issue_creator, issue_name)
+                            except Exception as err:
+                                print(err)
+                            if issue.raw['fields']['assignee'] != 'sergmakarov':
+                                jira.assign_issue(issue, 'sergmakarov')
+                                print('Reassigned to sergmakarov')
+                            to_assign = 1
+                        else:
+                            jira.transition_issue(issue, '21')
+                            assignee = issue.raw['fields']['assignee']
+                            print(f"Assigned to {assignee}")
+                            try:
+                                send_message(vovan_id, issue, issue_creator, issue_name)
+                            except Exception as err:
+                                print(err)
+                            if issue.raw['fields']['assignee'] != 'vivashov':
+                                jira.assign_issue(issue, 'vivashov')
+                                print('Reassigned to vivashov')
+                            to_assign = 0
                         # transition to status "В работе"
-                        jira.transition_issue(issue, '21')
-                        if issue.raw['fields']['assignee'] != 'sergmakarov':
-                            jira.assign_issue(issue, 'sergmakarov')
+
                     except Exception as err:
                         print("Err change status: ", err)
-#                         # got_err(err.__class__)
+            #                         # got_err(err.__class__)
             print("-------------------------------------------------------------------------------")
 
     except Exception as err:
         print("Failure to check new issues: ", err)
         # got_err(err.__class__)
-        Timer(15, loop).start()
+        if variable is False:
+            pass
+        else:
+            Timer(15, loop).start()
+
+
+def search_updates_timeout():
+    search_updates_timeout.call_count += 1
+
+    if search_updates_timeout.call_count > 10:
+        print('Reset')
+        return
+
+    try:
+        while True:
+            time.sleep(300)
+            print("Start searching updates...")
+            new_issues = jira.search_issues(
+                'updatedDate >= -6m and key in watchedIssues() AND status not in (Обработано, Закрыто, Отменено)')
+            if not new_issues:
+                print("No new updates!")
+
+            for issue in new_issues:
+                issue_creator = issue.raw['fields']['creator']['name']
+                issue_name = issue.raw['fields']['summary']
+                print("Issue is: ", issue)  # issue ID
+                try:
+                    send_message_updates(issue, issue_creator, issue_name)
+                except Exception as err:
+                    print(err)
+            print("-------------------------------------------------------------------------------")
+    except Exception as err:
+        print(err)
+        # got_err(err.__class__)
+        Timer(30, search_updates_timeout).start()
+
+
+thread_main_loop = threading.Thread(target=loop)
+thread_check_updates = threading.Thread(target=search_updates_timeout)
+
+# Jira
+
+jira = JIRA(
+    server="https://jira.o3.ru",
+    token_auth=secrets.api
+)
 
 
 def get_list(oh_crap):
@@ -108,15 +181,18 @@ def search_updates():
     return get_list(something_new)
 
 
+# TgBot
+
 bot = telebot.TeleBot(secrets.tg)
 
 my_id = 105517177
+vovan_id = 1823360851
 
 
-def send_message(issue, creator, name):
+def send_message(to_send_id, issue, creator, name):
     answer = hlink(f'{issue}: {name}', f'https://jira.ozon.ru/browse/{issue}')
     teams_link = hlink(f'{creator}', f'https://teams.microsoft.com/l/chat/0/0?users={creator}@ozon.ru')
-    bot.send_message(my_id, f'Hi! There is a new issue: {answer} from: {teams_link}', parse_mode='HTML')
+    bot.send_message(to_send_id, f'Hi! There is a new issue: {answer} from: {teams_link}', parse_mode='HTML')
 
 
 def send_message_updates(issue, creator, name):
@@ -130,59 +206,74 @@ def got_err(err):
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    itembtn1 = types.KeyboardButton('Issues on me')
-    itembtn2 = types.KeyboardButton('-')
-    itembtn3 = types.KeyboardButton('Updates')
-    markup.add(itembtn1, itembtn2, itembtn3)
-    bot.send_message(message.chat.id, "Choose what you want:", reply_markup=markup)
+    if message.chat.id == 105517177:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        itembtn1 = types.KeyboardButton('Issues on me')
+        itembtn2 = types.KeyboardButton('-')
+        itembtn3 = types.KeyboardButton('Updates')
+        markup.add(itembtn1, itembtn2, itembtn3)
+        bot.send_message(message.chat.id, "Choose what you want:", reply_markup=markup)
+        if variable is True:
+            pass
+        else:
+            start_stop(True)
+            print("Try to start")
+            thread_main_loop = threading.Thread(target=loop)
+            thread_main_loop.start()
+    else:
+        pass
 
 
 @bot.message_handler(content_types=['text'])
 def got_message(message):
-    keyboard = telebot.types.InlineKeyboardMarkup()
-    buttons_in_row = 1
-    buttons_added = []
-    if message.text == "Issues on me":
-        issues = issues_on_me()
-        issue_name = issues[2]
-        if not issues:
-            bot.send_message(my_id, text='Nothing!')
-        else:
-            issue_name_nums = 0
-            for issue in issues[0]:
-                issue_name_str = issue_name[issue_name_nums]
-                buttons_added.append(telebot.types.InlineKeyboardButton(f'{issue}: {issue_name_str}',
-                                                                        url=f'https://jira.ozon.ru/browse/{issue}'))
-                issue_name_nums += 1
-                if len(buttons_added) == buttons_in_row:
-                    keyboard.add(*buttons_added)
-                    buttons_added = []
-            bot.send_message(my_id, text='Issues on me:', reply_markup=keyboard)
+    if message.chat.id == 105517177:
+        keyboard = telebot.types.InlineKeyboardMarkup()
+        buttons_in_row = 1
+        buttons_added = []
+        if message.text == "Issues on me":
+            issues = issues_on_me()
+            issue_name = issues[2]
+            if not issues:
+                bot.send_message(my_id, text='Nothing!')
+            else:
+                issue_name_nums = 0
+                for issue in issues[0]:
+                    issue_name_str = issue_name[issue_name_nums]
+                    buttons_added.append(telebot.types.InlineKeyboardButton(f'{issue}: {issue_name_str}',
+                                                                            url=f'https://jira.ozon.ru/browse/{issue}'))
+                    issue_name_nums += 1
+                    if len(buttons_added) == buttons_in_row:
+                        keyboard.add(*buttons_added)
+                        buttons_added = []
+                bot.send_message(my_id, text='Issues on me:', reply_markup=keyboard)
 
-    elif message.text == "-":
-        answer = hlink(f'/start', '/start')
-        bot.send_message(my_id, f'Click start to open again: {answer}', parse_mode='HTML',
-                         reply_markup=types.ReplyKeyboardRemove())
+        elif message.text == "-":
+            answer = hlink(f'/start', '/start')
+            bot.send_message(my_id, f'Click start to open again: {answer}', parse_mode='HTML',
+                             reply_markup=types.ReplyKeyboardRemove())
+            start_stop(False)
 
-    elif message.text == "Updates":
-        issues = search_updates()
-        issue_name = issues[2]
-        if not issues:
-            bot.send_message(my_id, text='Nothing!')
-        else:
-            issue_name_nums = 0
-            for issue in issues[0]:
-                issue_name_str = issue_name[issue_name_nums]
-                buttons_added.append(telebot.types.InlineKeyboardButton(f'{issue}: {issue_name_str}',
-                                                                        url=f'https://jira.ozon.ru/browse/{issue}'))
-                if len(buttons_added) == buttons_in_row:
-                    keyboard.add(*buttons_added)
-                    buttons_added = []
-                issue_name_nums += 1
-            # return_btn = telebot.types.InlineKeyboardButton("Return", callback_data="return")
-            # keyboard.add(return_btn)
-            bot.send_message(my_id, text='Last updates:', reply_markup=keyboard)
+
+        elif message.text == "Updates":
+            issues = search_updates()
+            issue_name = issues[2]
+            if not issues:
+                bot.send_message(my_id, text='Nothing!')
+            else:
+                issue_name_nums = 0
+                for issue in issues[0]:
+                    issue_name_str = issue_name[issue_name_nums]
+                    buttons_added.append(telebot.types.InlineKeyboardButton(f'{issue}: {issue_name_str}',
+                                                                            url=f'https://jira.ozon.ru/browse/{issue}'))
+                    if len(buttons_added) == buttons_in_row:
+                        keyboard.add(*buttons_added)
+                        buttons_added = []
+                    issue_name_nums += 1
+                # return_btn = telebot.types.InlineKeyboardButton("Return", callback_data="return")
+                # keyboard.add(return_btn)
+                bot.send_message(my_id, text='Last updates:', reply_markup=keyboard)
+    else:
+        pass
 
 
 # @bot.callback_query_handler(func=lambda call: True)
@@ -191,42 +282,10 @@ def got_message(message):
 #         bot.answer_callback_query(call.id, "/start")
 
 
-def search_updates_timeout():
-    search_updates_timeout.call_count += 1
-
-    if search_updates_timeout.call_count > 10:
-        print('Reset')
-        return
-
-    try:
-        while True:
-            time.sleep(300)
-            print("Start searching updates...")
-            new_issues = jira.search_issues('updatedDate >= -6m and key in watchedIssues() AND status not in (Обработано, Закрыто, Отменено)')
-            if not new_issues:
-                print("No new updates!")
-
-            for issue in new_issues:
-                issue_creator = issue.raw['fields']['creator']['name']
-                issue_name = issue.raw['fields']['summary']
-                print("Issue is: ", issue)  # issue ID
-                try:
-                    send_message_updates(issue, issue_creator, issue_name)
-                except Exception as err:
-                    print(err)
-            print("-------------------------------------------------------------------------------")
-    except Exception as err:
-        print(err)
-        # got_err(err.__class__)
-        Timer(30, search_updates_timeout).start()
-
-
 loop.call_count = 0
 search_updates_timeout.call_count = 0
 
-thread_main_loop = threading.Thread(target=loop)
 thread_tg_bot = threading.Thread(target=bot.infinity_polling)
-thread_check_updates = threading.Thread(target=search_updates_timeout)
 
 thread_main_loop.start()
 thread_tg_bot.start()
