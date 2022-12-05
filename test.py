@@ -269,17 +269,9 @@ def got_message(message):
                         keyboard.add(*buttons_added)
                         buttons_added = []
                     issue_name_nums += 1
-                # return_btn = telebot.types.InlineKeyboardButton("Return", callback_data="return")
-                # keyboard.add(return_btn)
                 bot.send_message(my_id, text='Last updates:', reply_markup=keyboard)
     else:
         pass
-
-
-# @bot.callback_query_handler(func=lambda call: True)
-# def callback_query(call):
-#     if call.data == "return":
-#         bot.answer_callback_query(call.id, "/start")
 
 
 loop.call_count = 0
