@@ -12,26 +12,29 @@ from dist import secrets
 # Main
 
 variable = True
-to_assign = 1
+to_assign = 0
 
 
 def start_stop(var):
     global variable
     variable = var
 
+def restart():
+    thread_main_loop_restart = threading.Thread(target=loop)
+    thread_main_loop_restart.start()
 
 def loop():
     loop.call_count += 1
 
     if loop.call_count > 10:
         print('Reset')
-        return
+        loop.call_count = 0
+        return restart()
 
     try:
         global to_assign
         while True:
             flag = -1
-            time.sleep(10)
             print("Start searching new issues...")
             # Search issues
             new_issues = jira.search_issues(
@@ -59,7 +62,7 @@ def loop():
                     if name in comments:
                         print(f"Skip {issue} by comments conditions")
                         flag = 0
-                if "пропуск" in issue_name.lower() or "скуд" in issue_name.lower() or "vivashov" in issue_creator or "ivsuvorinov" in issue_creator or "otitov" in issue_creator or "возврат" in issue_name.lower():
+                if "пропуск" in issue_name.lower() or "скуд" in issue_name.lower() or "vivashov" in issue_creator or "ivsuvorinov" in issue_creator or "otitov" in issue_creator or "возврат" in issue_name.lower() or "предостав" in issue_name.lower() or "ноутбук" in issue_name.lower():
                     print(f"Skip {issue} by conditions by issue_name or creator_name")
                     flag = 0
 
@@ -96,6 +99,7 @@ def loop():
                         print("Err change status: ", err)
             #                         # got_err(err.__class__)
             print("-------------------------------------------------------------------------------")
+            time.sleep(10)
 
     except Exception as err:
         print("Failure to check new issues: ", err)
@@ -218,8 +222,7 @@ def send_welcome(message):
         else:
             start_stop(True)
             print("Try to start")
-            thread_main_loop = threading.Thread(target=loop)
-            thread_main_loop.start()
+            restart()
     else:
         pass
 
@@ -233,7 +236,7 @@ def got_message(message):
         if message.text == "Issues on me":
             issues = issues_on_me()
             issue_name = issues[2]
-            if not issues:
+            if not issue_name:
                 bot.send_message(my_id, text='Nothing!')
             else:
                 issue_name_nums = 0
