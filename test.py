@@ -3,6 +3,7 @@ import time
 from threading import Timer
 
 import telebot
+from datetime import datetime
 from aiogram.utils.markdown import hlink
 from jira.client import JIRA
 from telebot import types
@@ -12,26 +13,34 @@ from dist import secrets
 # Main
 
 variable = True
-to_assign = 1
+variable_time = True
+to_assign = 0
 
 
 def start_stop(var):
     global variable
     variable = var
 
+def start_stop_by_time(var):
+    global variable_time
+    variable_time = var
+
+def restart():
+    thread_main_loop_restart = threading.Thread(target=loop)
+    thread_main_loop_restart.start()
 
 def loop():
     loop.call_count += 1
 
     if loop.call_count > 10:
         print('Reset')
-        return
+        loop.call_count = 0
+        return restart()
 
     try:
         global to_assign
         while True:
             flag = -1
-            time.sleep(10)
             print("Start searching new issues...")
             # Search issues
             new_issues = jira.search_issues(
@@ -40,7 +49,7 @@ def loop():
             if not new_issues:
                 print("Yay! No new issues!")
             # check start/stop
-            if not variable:
+            if not variable or not variable_time:
                 print("Search new issues closed")
                 print("-------------------------------------------------------------------------------")
                 break
@@ -59,12 +68,11 @@ def loop():
                     if name in comments:
                         print(f"Skip {issue} by comments conditions")
                         flag = 0
-                if "пропуск" in issue_name.lower() or "скуд" in issue_name.lower() or "vivashov" in issue_creator or "ivsuvorinov" in issue_creator or "otitov" in issue_creator or "возврат" in issue_name.lower():
+                if "пропуск" in issue_name.lower() or "скуд" in issue_name.lower() or "vivashov" in issue_creator or "ivsuvorinov" in issue_creator or "otitov" in issue_creator or "возврат" in issue_name.lower() or "предостав" in issue_name.lower() or "ноутбук" in issue_name.lower():
                     print(f"Skip {issue} by conditions by issue_name or creator_name")
                     flag = 0
 
                 if flag == -1:
-                    #                         # got_err(err.__class__)
                     try:
                         if to_assign == 0:
                             jira.transition_issue(issue, '21')
@@ -94,8 +102,8 @@ def loop():
 
                     except Exception as err:
                         print("Err change status: ", err)
-            #                         # got_err(err.__class__)
             print("-------------------------------------------------------------------------------")
+            time.sleep(10)
 
     except Exception as err:
         print("Failure to check new issues: ", err)
@@ -104,6 +112,7 @@ def loop():
             pass
         else:
             Timer(15, loop).start()
+
 
 
 def search_updates_timeout():
@@ -218,8 +227,7 @@ def send_welcome(message):
         else:
             start_stop(True)
             print("Try to start")
-            thread_main_loop = threading.Thread(target=loop)
-            thread_main_loop.start()
+            restart()
     else:
         pass
 
@@ -233,7 +241,7 @@ def got_message(message):
         if message.text == "Issues on me":
             issues = issues_on_me()
             issue_name = issues[2]
-            if not issues:
+            if not issue_name:
                 bot.send_message(my_id, text='Nothing!')
             else:
                 issue_name_nums = 0
@@ -273,12 +281,36 @@ def got_message(message):
     else:
         pass
 
+def check_time():
+    global variable
+    flag = False
+    while True:
+        current_time = datetime.now()
+        sleep_hour = [23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        print(f'Hour is {current_time.hour}')
+        if current_time.hour in sleep_hour:
+            print('Sleep...')
+            flag = False
+            start_stop_by_time(False)
+        else:
+            if current_time.hour == 11 and flag == False:
+                flag = True
+                start_stop_by_time(False)
+                time.sleep(11)
+                start_stop_by_time(True)
+                loop()
+            else:
+                pass
+        time.sleep(300)
 
 loop.call_count = 0
 search_updates_timeout.call_count = 0
 
 thread_tg_bot = threading.Thread(target=bot.infinity_polling)
+thread_time_loop = threading.Thread(target=check_time)
+
 
 thread_main_loop.start()
 thread_tg_bot.start()
 thread_check_updates.start()
+thread_time_loop.start()
