@@ -3,6 +3,7 @@ import time
 from threading import Timer
 
 import telebot
+from datetime import datetime
 from aiogram.utils.markdown import hlink
 from jira.client import JIRA
 from telebot import types
@@ -12,12 +13,17 @@ from dist import secrets
 # Main
 
 variable = True
+variable_time = True
 to_assign = 0
 
 
 def start_stop(var):
     global variable
     variable = var
+
+def start_stop_by_time(var):
+    global variable_time
+    variable_time = var
 
 def restart():
     thread_main_loop_restart = threading.Thread(target=loop)
@@ -33,8 +39,8 @@ def loop():
 
     try:
         global to_assign
+        to_skip = ['SD911-2689821']
         while True:
-            flag = -1
             print("Start searching new issues...")
             # Search issues
             new_issues = jira.search_issues(
@@ -43,61 +49,66 @@ def loop():
             if not new_issues:
                 print("Yay! No new issues!")
             # check start/stop
-            if not variable:
+            if not variable or not variable_time:
                 print("Search new issues closed")
                 print("-------------------------------------------------------------------------------")
                 break
             for issue in new_issues:
-                issue_creator = issue.raw['fields']['creator']['name']
-                issue_name = issue.raw['fields']['summary']  # issue name like "проблема с пк"
-                check_comments = issue.raw['fields']['comment']['comments']  # comments from issue
-                comments = ''.join(map(str, check_comments))
-                print("Issue is: ", issue)  # issue ID
-                print("Check skud is: ", issue_name)
-                # check comments
-                # print("Check comments is: ", check_comments)
-                # print(type(comments))
-                names = ["isuvorinov", "alpechenin", "vivashov", "asmolensky", "otitov"]
-                for name in names:
-                    if name in comments:
-                        print(f"Skip {issue} by comments conditions")
-                        flag = 0
-                if "пропуск" in issue_name.lower() or "скуд" in issue_name.lower() or "vivashov" in issue_creator or "ivsuvorinov" in issue_creator or "otitov" in issue_creator or "возврат" in issue_name.lower() or "предостав" in issue_name.lower() or "ноутбук" in issue_name.lower():
-                    print(f"Skip {issue} by conditions by issue_name or creator_name")
-                    flag = 0
+                true_issue = str(issue)
+                if true_issue in to_skip:
+                    print(f'Issue {true_issue} is in to_skip')
+                    pass
+                else:
+                    issue_creator = issue.raw['fields']['creator']['name']
+                    issue_name = issue.raw['fields']['summary']  # issue name like "проблема с пк"
+                    check_comments = issue.raw['fields']['comment']['comments']  # comments from issue
+                    comments = ''.join(map(str, check_comments))
+                    print("Issue is: ", issue)  # issue ID
+                    print("Check skud is: ", issue_name)
+                    # check comments
+                    # print("Check comments is: ", check_comments)
+                    # print(type(comments))
+                    names = ["isuvorinov", "alpechenin", "vivashov", "asmolensky", "otitov"]
+                    for name in names:
+                        if name in comments:
+                            print(f"Skip {issue} by comments conditions")
+                            if true_issue not in to_skip:
+                                to_skip.append(true_issue)
+                    if "пропуск" in issue_name.lower() or "скуд" in issue_name.lower() or "vivashov" in issue_creator or "ivsuvorinov" in issue_creator or "otitov" in issue_creator or "возврат" in issue_name.lower() or "предостав" in issue_name.lower() or "ноутбук" in issue_name.lower():
+                        print(f"Skip {issue} by conditions issue_name or creator_name")
+                        if true_issue not in to_skip:
+                            to_skip.append(true_issue)
 
-                if flag == -1:
-                    #                         # got_err(err.__class__)
-                    try:
-                        if to_assign == 0:
-                            jira.transition_issue(issue, '21')
-                            assignee = issue.raw['fields']['assignee']
-                            print(f"Assigned to {assignee}")
-                            try:
-                                send_message(my_id, issue, issue_creator, issue_name)
-                            except Exception as err:
-                                print(err)
-                            if issue.raw['fields']['assignee'] != 'sergmakarov':
-                                jira.assign_issue(issue, 'sergmakarov')
-                                print('Reassigned to sergmakarov')
-                            to_assign = 1
-                        else:
-                            jira.transition_issue(issue, '21')
-                            assignee = issue.raw['fields']['assignee']
-                            print(f"Assigned to {assignee}")
-                            try:
-                                send_message(vovan_id, issue, issue_creator, issue_name)
-                            except Exception as err:
-                                print(err)
-                            if issue.raw['fields']['assignee'] != 'vivashov':
-                                jira.assign_issue(issue, 'vivashov')
-                                print('Reassigned to vivashov')
-                            to_assign = 0
-                        # transition to status "В работе"
+                    if true_issue not in to_skip:
+                        try:
+                            if to_assign == 0:
+                                jira.transition_issue(issue, '21')
+                                assignee = issue.raw['fields']['assignee']
+                                print(f"Assigned to {assignee}")
+                                try:
+                                    send_message(my_id, issue, issue_creator, issue_name)
+                                except Exception as err:
+                                    print(err)
+                                if issue.raw['fields']['assignee'] != 'sergmakarov':
+                                    jira.assign_issue(issue, 'sergmakarov')
+                                    print('Reassigned to sergmakarov')
+                                to_assign = 1
+                            else:
+                                jira.transition_issue(issue, '21')
+                                assignee = issue.raw['fields']['assignee']
+                                print(f"Assigned to {assignee}")
+                                try:
+                                    send_message(vovan_id, issue, issue_creator, issue_name)
+                                except Exception as err:
+                                    print(err)
+                                if issue.raw['fields']['assignee'] != 'vivashov':
+                                    jira.assign_issue(issue, 'vivashov')
+                                    print('Reassigned to vivashov')
+                                to_assign = 0
+                            # transition to status "В работе"
 
-                    except Exception as err:
-                        print("Err change status: ", err)
-            #                         # got_err(err.__class__)
+                        except Exception as err:
+                            print("Err change status: ", err)
             print("-------------------------------------------------------------------------------")
             time.sleep(10)
 
@@ -108,6 +119,7 @@ def loop():
             pass
         else:
             Timer(15, loop).start()
+
 
 
 def search_updates_timeout():
@@ -276,12 +288,36 @@ def got_message(message):
     else:
         pass
 
+def check_time():
+    global variable
+    flag = False
+    while True:
+        current_time = datetime.now()
+        sleep_hour = [23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        print(f'Hour is {current_time.hour}')
+        if current_time.hour in sleep_hour:
+            print('Sleep...')
+            flag = False
+            start_stop_by_time(False)
+        else:
+            if current_time.hour == 11 and flag == False:
+                flag = True
+                start_stop_by_time(False)
+                time.sleep(11)
+                start_stop_by_time(True)
+                loop()
+            else:
+                pass
+        time.sleep(300)
 
 loop.call_count = 0
 search_updates_timeout.call_count = 0
 
 thread_tg_bot = threading.Thread(target=bot.infinity_polling)
+thread_time_loop = threading.Thread(target=check_time)
+
 
 thread_main_loop.start()
 thread_tg_bot.start()
 thread_check_updates.start()
+thread_time_loop.start()
