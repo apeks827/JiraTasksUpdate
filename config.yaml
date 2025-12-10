@@ -1,0 +1,139 @@
+# JiraTasksUpdate Configuration
+
+# Jira Configuration
+jira:
+  server: "https://jira.o3.ru"
+  # Token is loaded from dist/secrets.py or environment variable JIRA_TOKEN
+  token_env_var: "JIRA_TOKEN"
+
+# Telegram Bot Configuration
+telegram:
+  # Token is loaded from dist/secrets.py or environment variable TG_TOKEN
+  token_env_var: "TG_TOKEN"
+  
+  # User IDs for notifications
+  users:
+    main_id: 105517177       # Primary user (e.g., you)
+    secondary_id: 1823360851 # Secondary user (e.g., Vovan)
+
+# Jira Search Configuration
+jira_search:
+  # Main loop: search for unassigned issues
+  new_issues_jql: |
+    project = SD911 
+    AND status = "Ожидает обработки" 
+    AND assignee in (EMPTY) 
+    AND "Группа исполнителей" = TS_TMB_team
+  
+  # Watcher: search for updates in watched issues
+  updates_jql: |
+    updatedDate >= -6m 
+    AND key in watchedIssues() 
+    AND status not in (Обработано, Закрыто, Отменено)
+  
+  # Fallback: search for my issues
+  my_issues_jql: |
+    status in ("Ожидает обработки", "Повторно открыта", "Ожидает разработки", Уточнено, "В работе", Согласовано) 
+    AND assignee in (currentUser())
+  
+  # Search for recent updates (last 4 days)
+  recent_updates_jql: |
+    updatedDate >= -4d 
+    AND key in watchedIssues() 
+    AND status not in (Обработано, Закрыто, Отменено)
+
+# Assignee Configuration (rotation between two users)
+assignee:
+  # Jira transition ID for status "В работе" (In Progress)
+  transition_id: "21"
+  
+  # Users for rotation assignment
+  rotation:
+    - username: "sergmakarov"
+      notify_chat_id: 105517177
+    - username: "vivashov"
+      notify_chat_id: 1823360851
+
+# Skip Rules for Issue Filtering
+skip_rules:
+  # Issues in this list are never processed
+  issue_keys:
+    - "SD911-2689821"
+  
+  # If any of these names appear in comments, skip the issue
+  comment_keywords:
+    - "isuvorinov"
+    - "alpechenin"
+    - "vivashov"
+    - "asmolensky"
+    - "otitov"
+  
+  # If any of these keywords appear in issue name (lowercase), skip
+  name_keywords:
+    - "пропуск"
+    - "скуд"
+    - "возврат"
+    - "предостав"
+    - "ноутбук"
+  
+  # If creator is in this list, skip the issue
+  creator_list:
+    - "vivashov"
+    - "ivsuvorinov"
+    - "otitov"
+
+# Polling Configuration
+polling:
+  # Main loop: check for new unassigned issues (in seconds)
+  new_issues_interval: 10
+  
+  # Watcher: check for updates (in seconds)
+  updates_interval: 300
+  
+  # Time checker: check if sleep hours should apply (in seconds)
+  time_check_interval: 300
+  
+  # Max call count before auto-reset (for memory leak prevention)
+  max_call_count: 10
+  
+  # Delay before restart on error (in seconds)
+  restart_delay: 15
+
+# Time-based Control
+time_control:
+  # Hours when the bot should sleep (no processing)
+  sleep_hours:
+    - 23
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+  
+  # Wake-up hour (when bot resumes after sleep)
+  wake_up_hour: 11
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  file: "logs/jira_updater.log"
+  max_file_size: 10485760  # 10 MB
+  backup_count: 5
+
+# Feature Toggles (can be extended in future)
+features:
+  # Enable/disable main issue processor
+  main_loop: true
+  # Enable/disable updates watcher
+  updates_watcher: true
+  # Enable/disable time-based sleep/wake
+  time_control: true
+  # Enable/disable telegram bot
+  telegram_bot: true
