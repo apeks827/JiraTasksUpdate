@@ -1,7 +1,19 @@
-"""Reporting module for Jira task statistics and export.
+"""Модуль отчётности для JiraTasksUpdate.
 
-Provides functionality to generate reports in CSV and Markdown formats,
-including metrics, statistics, and issue lists.
+Этот модуль отвечает за генерацию отчётов о задачах Jira в различных форматах:
+- CSV для импорта в Excel/табличные редакторы
+- Markdown для просмотра в GitHub/Slack/Telegram
+
+Отчёты включают:
+- Списки задач с полной информацией
+- Статистику по создателям, приоритетам, статусам
+- Метрики по назначенным задачам
+
+Примеры использования:
+    reporter = JiraReporter(output_dir='reports')
+    reporter.export_issues_csv(issues_list, 'issues.csv')
+    metrics = reporter.generate_metrics_report(new_issues, updates, assigned_by_user)
+    reporter.export_metrics_markdown(metrics, 'metrics.md')
 """
 
 import csv
@@ -12,34 +24,52 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 class JiraReporter:
-    """Generate reports for Jira issues."""
+    """Генератор отчётов для задач Jira.
+    
+    Преобразует список задач Jira в различные форматы отчётов
+    и собирает статистику по задачам.
+    """
 
     def __init__(self, output_dir: str = "reports"):
-        """Initialize reporter.
+        """Инициализация репортера.
 
         Args:
-            output_dir: Directory to save reports (auto-created).
+            output_dir: Директория для сохранения отчётов
         """
         self.output_dir = Path(output_dir)
+        # Создаём директорию если её нет
         self.output_dir.mkdir(exist_ok=True)
 
     def export_issues_csv(self, issues: List, filename: str = "issues.csv") -> str:
-        """Export issues list to CSV.
+        """Экспортировать список задач в CSV.
+
+        CSV включает столбцы:
+        - Key (ключ задачи)
+        - Summary (название)
+        - Status (статус)
+        - Creator (создатель)
+        - Assignee (исполнитель)
+        - Created (дата создания)
+        - Updated (дата последнего обновления)
+        - Priority (приоритет)
+        - Components (компоненты)
 
         Args:
-            issues: List of Jira issue objects.
-            filename: Output filename (without path).
+            issues: Список объектов задач из Jira
+            filename: Имя файла для сохранения
 
         Returns:
-            Full path to created CSV file.
+            Полный путь к созданному файлу
         """
         filepath = self.output_dir / filename
 
+        # Если задач нет, создаём пустой файл с сообщением
         if not issues:
             with open(filepath, "w", newline="", encoding="utf-8") as f:
                 f.write("No issues found\n")
             return str(filepath)
 
+        # Собираем строки с информацией о задачах
         rows = []
         for issue in issues:
             fields = issue.raw["fields"]
@@ -57,6 +87,7 @@ class JiraReporter:
                 ),
             })
 
+        # Пишем в CSV файл
         with open(filepath, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=rows[0].keys())
             writer.writeheader()
@@ -65,14 +96,17 @@ class JiraReporter:
         return str(filepath)
 
     def export_issues_markdown(self, issues: List, filename: str = "issues.md") -> str:
-        """Export issues list to Markdown.
+        """Экспортировать список задач в Markdown.
+
+        Создаёт красиво отформатированную Markdown таблицу с задачами,
+        которую можно вставить в документацию, Slack, GitHub и т.д.
 
         Args:
-            issues: List of Jira issue objects.
-            filename: Output filename (without path).
+            issues: Список объектов задач из Jira
+            filename: Имя файла для сохранения
 
         Returns:
-            Full path to created Markdown file.
+            Полный путь к созданному файлу
         """
         filepath = self.output_dir / filename
 
@@ -84,8 +118,10 @@ class JiraReporter:
                 f.write("No issues found.\n")
                 return str(filepath)
 
+            # Сводная информация
             f.write(f"## Summary\n\nTotal issues: {len(issues)}\n\n")
 
+            # Таблица с задачами
             f.write("## Issues\n\n")
             f.write("| Key | Summary | Status | Creator | Assignee | Priority |\n")
             f.write("|-----|---------|--------|---------|----------|----------|\n")
@@ -93,6 +129,7 @@ class JiraReporter:
             for issue in issues:
                 fields = issue.raw["fields"]
                 key = issue.key
+                # Экранируем символ | в названии задачи
                 summary = fields.get("summary", "").replace("|", "\\|")[:50]
                 status = fields.get("status", {}).get("name", "")
                 creator = fields.get("creator", {}).get("name", "")
@@ -106,31 +143,38 @@ class JiraReporter:
     def generate_metrics_report(
         self, new_issues: List, updates: List, assigned_by_user: Dict[str, int]
     ) -> Dict[str, Any]:
-        """Generate metrics and statistics.
+        """Сгенерировать метрики и статистику по задачам.
+
+        Подсчитывает:
+        - Количество новых и обновлённых задач
+        - Распределение по статусам
+        - Распределение по создателям
+        - Распределение по приоритетам
+        - Количество назначений на каждого пользователя
 
         Args:
-            new_issues: List of unassigned/new issues.
-            updates: List of updated issues.
-            assigned_by_user: Dict {username: count} of assignments made.
+            new_issues: Список новых/необработанных задач
+            updates: Список обновлённых задач
+            assigned_by_user: Словарь {username: count} количеств назначений
 
         Returns:
-            Dictionary with metrics.
+            Словарь с метриками
         """
-        # Count by status
+        # Подсчитываем задачи по статусам
         status_count = defaultdict(int)
         for issue in new_issues + updates:
             fields = issue.raw["fields"]
             status = fields.get("status", {}).get("name", "Unknown")
             status_count[status] += 1
 
-        # Count by creator
+        # Подсчитываем задачи по создателям
         creator_count = defaultdict(int)
         for issue in new_issues:
             fields = issue.raw["fields"]
             creator = fields.get("creator", {}).get("name", "Unknown")
             creator_count[creator] += 1
 
-        # Count by priority
+        # Подсчитываем задачи по приоритетам
         priority_count = defaultdict(int)
         for issue in new_issues:
             fields = issue.raw["fields"]
@@ -151,14 +195,16 @@ class JiraReporter:
     def export_metrics_markdown(
         self, metrics: Dict[str, Any], filename: str = "metrics.md"
     ) -> str:
-        """Export metrics report to Markdown.
+        """Экспортировать метрики в Markdown.
+
+        Создаёт красиво оформленный отчёт метрик для чтения.
 
         Args:
-            metrics: Metrics dictionary from generate_metrics_report().
-            filename: Output filename (without path).
+            metrics: Словарь метрик из generate_metrics_report()
+            filename: Имя файла для сохранения
 
         Returns:
-            Full path to created Markdown file.
+            Полный путь к созданному файлу
         """
         filepath = self.output_dir / filename
 
@@ -166,13 +212,13 @@ class JiraReporter:
             f.write("# Jira Metrics Report\n\n")
             f.write(f"Generated: {metrics['timestamp']}\n\n")
 
-            # Summary
+            # Сводка
             f.write("## Summary\n\n")
             f.write(f"- **New Issues**: {metrics['new_issues_count']}\n")
             f.write(f"- **Updated Issues**: {metrics['updated_issues_count']}\n")
             f.write(f"- **Total Issues**: {metrics['total_issues']}\n\n")
 
-            # Status breakdown
+            # Распределение по статусам
             f.write("## Status Breakdown\n\n")
             if metrics.get("status_breakdown"):
                 for status, count in metrics["status_breakdown"].items():
@@ -181,9 +227,10 @@ class JiraReporter:
             else:
                 f.write("No status data available.\n\n")
 
-            # Creator breakdown
+            # Распределение по создателям
             f.write("## Issues by Creator\n\n")
             if metrics.get("creator_breakdown"):
+                # Сортируем по количеству (больше всего сверху)
                 creator_sorted = sorted(
                     metrics["creator_breakdown"].items(), key=lambda x: x[1], reverse=True
                 )
@@ -193,9 +240,10 @@ class JiraReporter:
             else:
                 f.write("No creator data available.\n\n")
 
-            # Priority breakdown
+            # Распределение по приоритетам
             f.write("## Issues by Priority\n\n")
             if metrics.get("priority_breakdown"):
+                # Выводим в стандартном порядке приоритетов
                 priority_order = ["Highest", "High", "Medium", "Low", "Lowest"]
                 for priority in priority_order:
                     count = metrics["priority_breakdown"].get(priority, 0)
@@ -205,7 +253,7 @@ class JiraReporter:
             else:
                 f.write("No priority data available.\n\n")
 
-            # Assignments
+            # Назначения по пользователям
             f.write("## Assignments by User\n\n")
             if metrics.get("assignments_by_user"):
                 for user, count in sorted(
@@ -221,20 +269,21 @@ class JiraReporter:
     def export_metrics_csv(
         self, metrics: Dict[str, Any], filename: str = "metrics.csv"
     ) -> str:
-        """Export metrics to CSV.
+        """Экспортировать метрики в CSV для импорта в Excel.
 
         Args:
-            metrics: Metrics dictionary from generate_metrics_report().
-            filename: Output filename (without path).
+            metrics: Словарь метрик из generate_metrics_report()
+            filename: Имя файла для сохранения
 
         Returns:
-            Full path to created CSV file.
+            Полный путь к созданному файлу
         """
         filepath = self.output_dir / filename
 
         with open(filepath, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
 
+            # Основная статистика
             writer.writerow(["Metric", "Value"])
             writer.writerow(["Timestamp", metrics["timestamp"]])
             writer.writerow(["New Issues", metrics["new_issues_count"]])
@@ -242,21 +291,25 @@ class JiraReporter:
             writer.writerow(["Total Issues", metrics["total_issues"]])
             writer.writerow([""])
 
+            # Статусы
             writer.writerow(["Status", "Count"])
             for status, count in metrics.get("status_breakdown", {}).items():
                 writer.writerow([status, count])
             writer.writerow([""])
 
+            # Создатели
             writer.writerow(["Creator", "Count"])
             for creator, count in metrics.get("creator_breakdown", {}).items():
                 writer.writerow([creator, count])
             writer.writerow([""])
 
+            # Приоритеты
             writer.writerow(["Priority", "Count"])
             for priority, count in metrics.get("priority_breakdown", {}).items():
                 writer.writerow([priority, count])
             writer.writerow([""])
 
+            # Назначения
             writer.writerow(["User", "Assignments"])
             for user, count in metrics.get("assignments_by_user", {}).items():
                 writer.writerow([user, count])
@@ -270,25 +323,28 @@ class JiraReporter:
         assigned_by_user: Dict[str, int],
         basename: str = "daily_report",
     ) -> Tuple[str, str]:
-        """Generate full daily report (Markdown + CSV metrics).
+        """Сгенерировать полный дневной отчёт (Markdown + CSV метрики).
+
+        Создаёт оба файла отчёта с временными метками в именах файлов.
 
         Args:
-            new_issues: New unassigned issues.
-            updates: Updated issues.
-            assigned_by_user: Dict {username: count}.
-            basename: Base name for files (timestamps will be added).
+            new_issues: Список новых задач
+            updates: Список обновлённых задач
+            assigned_by_user: Словарь {username: count}
+            basename: Базовое имя для файлов
 
         Returns:
-            Tuple of (markdown_filepath, metrics_filepath).
+            Кортеж (путь_к_markdown_отчёту, путь_к_метрикам)
         """
+        # Генерируем временную метку для имён файлов
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Export issues
+        # Экспортируем задачи
         md_file = self.export_issues_markdown(
             new_issues + updates, f"{basename}_{timestamp}.md"
         )
 
-        # Generate and export metrics
+        # Генерируем и экспортируем метрики
         metrics = self.generate_metrics_report(new_issues, updates, assigned_by_user)
         metrics_file = self.export_metrics_markdown(metrics, f"metrics_{timestamp}.md")
 
