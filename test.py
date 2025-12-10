@@ -1,113 +1,235 @@
+"""Main JiraTasksUpdate module with automated Jira task processing and Telegram notifications."""
+
 import logging
 import threading
 import time
 from datetime import datetime
 from threading import Timer
+from typing import Optional
 
 from aiogram.utils.markdown import hlink
 from jira.client import JIRA
 import telebot
 from telebot import types
 
-from dist import secrets
+logger = logging.getLogger(__name__)
 
 
 class JiraTaskUpdater:
-    def __init__(self, jira_client: JIRA, bot: telebot.TeleBot, my_id: int, vovan_id: int):
+    """Main class for automated Jira task processing."""
+
+    def __init__(
+        self,
+        jira_client: JIRA,
+        bot: Optional[telebot.TeleBot],
+        my_id: int,
+        vovan_id: int,
+        config=None,
+        dry_run: bool = False,
+    ):
+        """Initialize JiraTaskUpdater.
+
+        Args:
+            jira_client: JIRA client instance.
+            bot: Telegram bot instance (can be None).
+            my_id: Primary user Telegram ID.
+            vovan_id: Secondary user Telegram ID.
+            config: Config object for settings (optional).
+            dry_run: If True, no actual changes are made.
+        """
         self.jira = jira_client
         self.bot = bot
         self.my_id = my_id
         self.vovan_id = vovan_id
+        self.config = config
+        self.dry_run = dry_run
 
-        # state
+        # State flags
         self.running_main_loop = True
         self.running_by_time = True
         self.to_assign = 0
-        self.to_skip = {"SD911-2689821"}
 
-        # counters for self-reset
+        # Skip rules
+        if config:
+            self.to_skip = config.get_skip_issue_keys().copy()
+            self.skip_comment_keywords = config.get_skip_comment_keywords()
+            self.skip_name_keywords = config.get_skip_name_keywords()
+            self.skip_creators = config.get_skip_creators()
+            self.sleep_hours = config.get_sleep_hours()
+            self.assignees = config.get_assignees()
+        else:
+            # Fallback to hardcoded defaults
+            self.to_skip = {"SD911-2689821"}
+            self.skip_comment_keywords = {"isuvorinov", "alpechenin", "vivashov", "asmolensky", "otitov"}
+            self.skip_name_keywords = {"пропуск", "скуд", "возврат", "предостав", "ноутбук"}
+            self.skip_creators = {"vivashov", "ivsuvorinov", "otitov"}
+            self.sleep_hours = {23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+            self.assignees = [("sergmakarov", 105517177), ("vivashov", 1823360851)]
+
+        # Counters for self-reset
         self.main_loop_call_count = 0
         self.search_updates_call_count = 0
 
-        # threads
+        # Cache for processed issues (prevent duplicate notifications)
+        self.processed_issues_cache = set()
+        self.cache_expiry = {}
+
+        # Threads
         self.thread_main_loop = threading.Thread(target=self.loop, name="main_loop", daemon=True)
         self.thread_check_updates = threading.Thread(target=self.search_updates_timeout, name="updates_loop", daemon=True)
-        self.thread_tg_bot = threading.Thread(target=self.bot.infinity_polling, name="tg_bot", daemon=True)
+        self.thread_tg_bot = threading.Thread(target=self._telegram_polling, name="tg_bot", daemon=True)
         self.thread_time_loop = threading.Thread(target=self.check_time, name="time_loop", daemon=True)
 
-        # logger
-        self.logger = logging.getLogger(__name__)
+    def _telegram_polling(self) -> None:
+        """Run Telegram bot polling."""
+        if self.bot:
+            try:
+                self.bot.infinity_polling()
+            except Exception as e:  # noqa: BLE001
+                logger.exception("Telegram polling error: %s", e)
 
     # --- public API ---
 
     def start(self) -> None:
         """Start all background threads."""
-        self.logger.info("Starting JiraTaskUpdater threads")
-        self.thread_main_loop.start()
-        self.thread_check_updates.start()
-        self.thread_tg_bot.start()
-        self.thread_time_loop.start()
+        logger.info("Starting JiraTaskUpdater threads")
+        if self.config and not self.config.is_feature_enabled("main_loop"):
+            logger.info("Main loop is disabled in config")
+        else:
+            self.thread_main_loop.start()
+
+        if self.config and not self.config.is_feature_enabled("updates_watcher"):
+            logger.info("Updates watcher is disabled in config")
+        else:
+            self.thread_check_updates.start()
+
+        if self.config and not self.config.is_feature_enabled("telegram_bot"):
+            logger.info("Telegram bot is disabled in config")
+        elif self.bot:
+            self.thread_tg_bot.start()
+
+        if self.config and not self.config.is_feature_enabled("time_control"):
+            logger.info("Time control is disabled in config")
+        else:
+            self.thread_time_loop.start()
 
     def stop(self) -> None:
         """Signal threads to stop gracefully."""
-        self.logger.info("Stopping JiraTaskUpdater")
+        logger.info("Stopping JiraTaskUpdater")
         self.running_main_loop = False
         self.running_by_time = False
+
+    def process_once(self) -> None:
+        """Process issues once and return (useful for cron jobs).
+
+        This is a synchronous, single-run mode that processes new issues and updates
+        without starting any background threads.
+        """
+        logger.info("Processing issues once (cron mode)")
+        try:
+            self._process_new_issues_batch()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error processing new issues: %s", e)
+
+        try:
+            self._process_updates_batch()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error processing updates: %s", e)
 
     # --- internal helpers ---
 
     def _toggle_main_loop(self, value: bool) -> None:
-        self.logger.info("Set running_main_loop=%s", value)
         self.running_main_loop = value
+        logger.info("Set running_main_loop=%s", value)
 
     def _toggle_by_time(self, value: bool) -> None:
-        self.logger.info("Set running_by_time=%s", value)
         self.running_by_time = value
+        logger.info("Set running_by_time=%s", value)
 
-    # --- core Jira polling loop ---
+    def _is_cached(self, issue_key: str) -> bool:
+        """Check if issue is in cache and not expired."""
+        if issue_key not in self.processed_issues_cache:
+            return False
+
+        expiry = self.cache_expiry.get(issue_key)
+        if expiry and time.time() < expiry:
+            return True
+
+        # Cache expired, remove it
+        self.processed_issues_cache.discard(issue_key)
+        self.cache_expiry.pop(issue_key, None)
+        return False
+
+    def _cache_issue(self, issue_key: str, ttl_seconds: int = 3600) -> None:
+        """Add issue to cache with TTL (time to live)."""
+        self.processed_issues_cache.add(issue_key)
+        self.cache_expiry[issue_key] = time.time() + ttl_seconds
+        logger.debug("Cached issue %s for %d seconds", issue_key, ttl_seconds)
+
+    # --- core Jira polling logic ---
 
     def loop(self) -> None:
+        """Main polling loop for new unassigned issues."""
         self.main_loop_call_count += 1
 
-        if self.main_loop_call_count > 10:
-            self.logger.warning("main loop call count exceeded, reset")
+        if self.main_loop_call_count > (self.config.get("polling.max_call_count", 10) if self.config else 10):
+            logger.warning("main_loop call count exceeded, reset")
             self.main_loop_call_count = 0
             Timer(5, self.loop).start()
             return
 
         try:
             while True:
-                self.logger.info("Start searching new issues...")
-
-                new_issues = self.jira.search_issues(
-                    'project = SD911 AND status = "Ожидает обработки" AND assignee in (EMPTY) AND "Группа '
-                    'исполнителей" = TS_TMB_team'
-                )
-
-                if not new_issues:
-                    self.logger.info("No new issues")
-
                 if not self.running_main_loop or not self.running_by_time:
-                    self.logger.info("Main loop stopped by flags")
-                    self.logger.info("-------------------------------------------------------------------------------")
+                    logger.info("Main loop stopped by flags")
                     break
 
-                for issue in new_issues:
-                    self._process_new_issue(issue)
+                self._process_new_issues_batch()
 
-                self.logger.info("-------------------------------------------------------------------------------")
-                time.sleep(10)
+                interval = self.config.get("polling.new_issues_interval", 10) if self.config else 10
+                time.sleep(interval)
 
-        except Exception as err:  # noqa: BLE001
-            self.logger.exception("Failure to check new issues: %s", err)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Failure in main loop: %s", e)
             if self.running_main_loop:
-                Timer(15, self.loop).start()
+                restart_delay = self.config.get("polling.restart_delay", 15) if self.config else 15
+                Timer(restart_delay, self.loop).start()
+
+    def _process_new_issues_batch(self) -> None:
+        """Fetch and process batch of new unassigned issues."""
+        logger.info("Start searching new issues...")
+
+        try:
+            jql = self.config.get("jira_search.new_issues_jql") if self.config else None
+            if not jql:
+                jql = (
+                    'project = SD911 AND status = "Ожидает обработки" '
+                    'AND assignee in (EMPTY) AND "Группа исполнителей" = TS_TMB_team'
+                )
+            new_issues = self.jira.search_issues(jql)
+
+            if not new_issues:
+                logger.info("No new issues")
+                return
+
+            logger.info("Found %d new issues", len(new_issues))
+            for issue in new_issues:
+                self._process_new_issue(issue)
+
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error fetching new issues: %s", e)
 
     def _process_new_issue(self, issue) -> None:
+        """Process a single new issue: check skip conditions, assign if needed."""
         true_issue = str(issue)
 
+        # Check cache and skip list
         if true_issue in self.to_skip:
-            self.logger.info("Issue %s in skip list", true_issue)
+            logger.info("Issue %s in permanent skip list", true_issue)
+            return
+
+        if self._is_cached(true_issue):
+            logger.debug("Issue %s in cache, skip", true_issue)
             return
 
         fields = issue.raw["fields"]
@@ -116,100 +238,139 @@ class JiraTaskUpdater:
         comments_raw = fields["comment"]["comments"]
         comments = "".join(map(str, comments_raw))
 
-        self.logger.info("Issue: %s | name: %s", issue, issue_name)
+        logger.info("Processing: %s | name: %s | creator: %s", issue, issue_name, issue_creator)
 
-        names_to_skip = {"isuvorinov", "alpechenin", "vivashov", "asmolensky", "otitov"}
-        if any(name in comments for name in names_to_skip):
-            self.logger.info("Skip %s by comments conditions", issue)
-            self.to_skip.add(true_issue)
+        # Check comment keywords
+        if any(name in comments for name in self.skip_comment_keywords):
+            logger.info("Skip %s: comment condition matched", issue)
+            self._cache_issue(true_issue)
             return
 
-        skip_name_keywords = ("пропуск", "скуд", "возврат", "предостав", "ноутбук")
-        skip_creators = {"vivashov", "ivsuvorinov", "otitov"}
-
+        # Check name and creator conditions
         if (
-            any(word in issue_name.lower() for word in skip_name_keywords)
-            or issue_creator in skip_creators
+            any(word in issue_name.lower() for word in self.skip_name_keywords)
+            or issue_creator in self.skip_creators
         ):
-            self.logger.info("Skip %s by issue_name/creator conditions", issue)
-            self.to_skip.add(true_issue)
+            logger.info("Skip %s: name/creator condition matched", issue)
+            self._cache_issue(true_issue)
             return
 
+        # Assign issue
         self._assign_issue(issue, issue_creator, issue_name)
+        self._cache_issue(true_issue, ttl_seconds=300)  # Cache for 5 minutes
 
     def _assign_issue(self, issue, creator: str, name: str) -> None:
+        """Transition issue status and assign to next user in rotation."""
         try:
-            self.jira.transition_issue(issue, "21")
-            assignee = issue.raw["fields"]["assignee"]
-            self.logger.info("Assigned to %s", assignee)
+            transition_id = self.config.get("assignee.transition_id", "21") if self.config else "21"
 
-            if self.to_assign == 0:
-                self._safe_send_message(self.my_id, issue, creator, name)
-                self._reassign_if_needed(issue, "sergmakarov")
-                self.to_assign = 1
+            if not self.dry_run:
+                self.jira.transition_issue(issue, transition_id)
+                logger.info("Transitioned %s to status 'In Progress'", issue)
             else:
-                self._safe_send_message(self.vovan_id, issue, creator, name)
-                self._reassign_if_needed(issue, "vivashov")
-                self.to_assign = 0
+                logger.info("[DRY-RUN] Would transition %s to status 'In Progress'", issue)
 
-        except Exception as err:  # noqa: BLE001
-            self.logger.exception("Error changing status: %s", err)
+            # Get next assignee
+            assignee_username, chat_id = self.assignees[self.to_assign]
+            self.to_assign = (self.to_assign + 1) % len(self.assignees)
 
-    def _safe_send_message(self, chat_id: int, issue, creator: str, name: str) -> None:
-        try:
-            self.send_message(chat_id, issue, creator, name)
-        except Exception as err:  # noqa: BLE001
-            self.logger.exception("Error sending message: %s", err)
+            logger.info("Assigning to %s (notify: %d)", assignee_username, chat_id)
+
+            if not self.dry_run:
+                self._safe_send_message(chat_id, issue, creator, name)
+                self._reassign_if_needed(issue, assignee_username)
+            else:
+                logger.info("[DRY-RUN] Would notify %d and assign to %s", chat_id, assignee_username)
+
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error assigning issue %s: %s", issue, e)
 
     def _reassign_if_needed(self, issue, expected_assignee: str) -> None:
-        current_assignee = issue.raw["fields"].get("assignee")
-        if current_assignee != expected_assignee:
-            self.jira.assign_issue(issue, expected_assignee)
-            self.logger.info("Reassigned to %s", expected_assignee)
+        """Reassign issue if current assignee differs from expected."""
+        try:
+            current_assignee = issue.raw["fields"].get("assignee")
+            if current_assignee != expected_assignee:
+                self.jira.assign_issue(issue, expected_assignee)
+                logger.info("Reassigned %s to %s", issue, expected_assignee)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error reassigning issue: %s", e)
+
+    def _safe_send_message(self, chat_id: int, issue, creator: str, name: str) -> None:
+        """Send Telegram message safely with error handling."""
+        try:
+            self.send_message(chat_id, issue, creator, name)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error sending message: %s", e)
 
     # --- updates watcher ---
 
     def search_updates_timeout(self) -> None:
+        """Periodic watcher for updated issues."""
         self.search_updates_call_count += 1
 
-        if self.search_updates_call_count > 10:
-            self.logger.warning("search_updates_timeout call count exceeded, stop")
+        max_count = self.config.get("polling.max_call_count", 10) if self.config else 10
+        if self.search_updates_call_count > max_count:
+            logger.warning("search_updates_timeout call count exceeded, stop")
             return
 
         try:
             while True:
-                time.sleep(300)
-                self.logger.info("Start searching updates...")
+                interval = self.config.get("polling.updates_interval", 300) if self.config else 300
+                time.sleep(interval)
 
-                new_issues = self.jira.search_issues(
-                    "updatedDate >= -6m and key in watchedIssues() AND status not in (Обработано, Закрыто, Отменено)"
+                if not self.running_main_loop or not self.running_by_time:
+                    break
+
+                self._process_updates_batch()
+
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Failure in updates watcher: %s", e)
+            restart_delay = self.config.get("polling.restart_delay", 30) if self.config else 30
+            Timer(restart_delay, self.search_updates_timeout).start()
+
+    def _process_updates_batch(self) -> None:
+        """Fetch and process batch of watched issue updates."""
+        logger.info("Start searching updates...")
+
+        try:
+            jql = self.config.get("jira_search.updates_jql") if self.config else None
+            if not jql:
+                jql = (
+                    "updatedDate >= -6m AND key in watchedIssues() "
+                    "AND status not in (Обработано, Закрыто, Отменено)"
                 )
+            new_issues = self.jira.search_issues(jql)
 
-                if not new_issues:
-                    self.logger.info("No new updates")
+            if not new_issues:
+                logger.info("No new updates")
+                return
 
-                for issue in new_issues:
-                    fields = issue.raw["fields"]
-                    issue_creator = fields["creator"]["name"]
-                    issue_name = fields["summary"]
-                    self.logger.info("Updated issue: %s", issue)
+            logger.info("Found %d updated issues", len(new_issues))
+            for issue in new_issues:
+                fields = issue.raw["fields"]
+                issue_creator = fields["creator"]["name"]
+                issue_name = fields["summary"]
+                logger.info("Updated: %s", issue)
+
+                if not self.dry_run:
                     self._safe_send_message_updates(issue, issue_creator, issue_name)
+                else:
+                    logger.info("[DRY-RUN] Would send update for %s", issue)
 
-                self.logger.info("-------------------------------------------------------------------------------")
-
-        except Exception as err:  # noqa: BLE001
-            self.logger.exception("Failure in updates watcher: %s", err)
-            Timer(30, self.search_updates_timeout).start()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error fetching updates: %s", e)
 
     def _safe_send_message_updates(self, issue, creator: str, name: str) -> None:
+        """Send update notification safely."""
         try:
             self.send_message_updates(issue, creator, name)
-        except Exception as err:  # noqa: BLE001
-            self.logger.exception("Error sending update message: %s", err)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error sending update message: %s", e)
 
-    # --- Jira helpers (lists) ---
+    # --- Jira helpers (get lists for Telegram commands) ---
 
     def _get_list(self, issues_raw):
+        """Extract lists of (issues, creators, names) from Jira issues."""
         issues = []
         creators = []
         names = []
@@ -221,157 +382,94 @@ class JiraTaskUpdater:
         return issues, creators, names
 
     def new_issues_ondesk(self):
-        new_issues = self.jira.search_issues(
-            'project = SD911 AND status = "Ожидает обработки" AND assignee in (EMPTY) AND "Группа '
-            'исполнителей" = TS_TMB_team'
-        )
+        """Get list of unassigned issues waiting for processing."""
+        jql = self.config.get("jira_search.new_issues_jql") if self.config else None
+        if not jql:
+            jql = (
+                'project = SD911 AND status = "Ожидает обработки" '
+                'AND assignee in (EMPTY) AND "Группа исполнителей" = TS_TMB_team'
+            )
+        new_issues = self.jira.search_issues(jql)
         return self._get_list(new_issues)
 
     def issues_on_me(self):
-        raw = self.jira.search_issues(
-            'status in ("Ожидает обработки", "Повторно открыта", "Ожидает разработки", Уточнено, '
-            '"В работе", Согласовано) AND assignee in (currentUser())'
-        )
-        self.logger.info("issues_on_me raw: %s", raw)
+        """Get list of my assigned issues."""
+        jql = self.config.get("jira_search.my_issues_jql") if self.config else None
+        if not jql:
+            jql = (
+                'status in ("Ожидает обработки", "Повторно открыта", "Ожидает разработки", Уточнено, '
+                '"В работе", Согласовано) AND assignee in (currentUser())'
+            )
+        raw = self.jira.search_issues(jql)
+        logger.info("issues_on_me: %s", raw)
         return self._get_list(raw)
 
     def search_updates(self):
-        raw = self.jira.search_issues(
-            'updatedDate >= -4d and key in watchedIssues() AND status not in (Обработано, '
-            "Закрыто, Отменено)"
-        )
+        """Get recent updates in watched issues."""
+        jql = self.config.get("jira_search.recent_updates_jql") if self.config else None
+        if not jql:
+            jql = (
+                'updatedDate >= -4d AND key in watchedIssues() '
+                'AND status not in (Обработано, Закрыто, Отменено)'
+            )
+        raw = self.jira.search_issues(jql)
         return self._get_list(raw)
 
     # --- Telegram helpers ---
 
     def send_message(self, to_send_id: int, issue, creator: str, name: str) -> None:
-        answer = hlink(f"{issue}: {name}", f"https://jira.ozon.ru/browse/{issue}")
-        teams_link = hlink(creator, f"https://teams.microsoft.com/l/chat/0/0?users={creator}@ozon.ru")
-        self.bot.send_message(to_send_id, f"Hi! There is a new issue: {answer} from: {teams_link}", parse_mode="HTML")
+        """Send new issue notification to Telegram."""
+        if not self.bot:
+            logger.warning("Telegram bot not initialized, cannot send message")
+            return
+
+        try:
+            answer = hlink(f"{issue}: {name}", f"https://jira.ozon.ru/browse/{issue}")
+            teams_link = hlink(creator, f"https://teams.microsoft.com/l/chat/0/0?users={creator}@ozon.ru")
+            msg = f"Hi! There is a new issue: {answer} from: {teams_link}"
+            self.bot.send_message(to_send_id, msg, parse_mode="HTML")
+            logger.info("Sent notification for %s to %d", issue, to_send_id)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error sending message: %s", e)
+            raise
 
     def send_message_updates(self, issue, creator: str, name: str) -> None:
-        answer = hlink(f"{issue}: {name}", f"https://jira.ozon.ru/browse/{issue}")
-        self.bot.send_message(self.my_id, f"Hi! There is a new update: {answer} from {creator}", parse_mode="HTML")
+        """Send update notification to Telegram."""
+        if not self.bot:
+            logger.warning("Telegram bot not initialized, cannot send message")
+            return
 
-    def got_err(self, err) -> None:
-        self.bot.send_message(self.my_id, f"Got err, check: {err}")
+        try:
+            answer = hlink(f"{issue}: {name}", f"https://jira.ozon.ru/browse/{issue}")
+            msg = f"Hi! There is a new update: {answer} from {creator}"
+            self.bot.send_message(self.my_id, msg, parse_mode="HTML")
+            logger.info("Sent update notification for %s", issue)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error sending update message: %s", e)
+            raise
 
     # --- time-based control ---
 
     def check_time(self) -> None:
+        """Monitor current time and toggle sleep/wake mode."""
         flag = False
-        sleep_hours = {23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 
         while True:
             current_time = datetime.now()
-            self.logger.info("Hour is %s", current_time.hour)
+            logger.info("Hour is %s", current_time.hour)
 
-            if current_time.hour in sleep_hours:
-                self.logger.info("Sleep mode")
+            if current_time.hour in self.sleep_hours:
+                logger.info("Sleep mode enabled")
                 flag = False
                 self._toggle_by_time(False)
             else:
-                if current_time.hour == 11 and not flag:
+                wake_up_hour = self.config.get("time_control.wake_up_hour", 11) if self.config else 11
+                if current_time.hour == wake_up_hour and not flag:
                     flag = True
                     self._toggle_by_time(False)
                     time.sleep(11)
                     self._toggle_by_time(True)
                     self.loop()
 
-            time.sleep(300)
-
-
-# --- module-level setup to preserve behaviour ---
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-
-jira_client = JIRA(
-    server="https://jira.o3.ru",
-    token_auth=secrets.api,
-)
-
-bot = telebot.TeleBot(secrets.tg)
-
-MY_ID = 105517177
-VOVAN_ID = 1823360851
-
-updater = JiraTaskUpdater(jira_client=jira_client, bot=bot, my_id=MY_ID, vovan_id=VOVAN_ID)
-
-
-@bot.message_handler(commands=["start", "help"])
-def send_welcome(message):  # noqa: D401
-    """Handle /start and /help commands."""
-    if message.chat.id != MY_ID:
-        return
-
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    itembtn1 = types.KeyboardButton("Issues on me")
-    itembtn2 = types.KeyboardButton("-")
-    itembtn3 = types.KeyboardButton("Updates")
-    markup.add(itembtn1, itembtn2, itembtn3)
-
-    bot.send_message(message.chat.id, "Choose what you want:", reply_markup=markup)
-
-    if not updater.running_main_loop:
-        updater._toggle_main_loop(True)
-        updater.logger.info("Restart main loop from /start")
-        Timer(1, updater.loop).start()
-
-
-@bot.message_handler(content_types=["text"])
-def handle_text(message):
-    if message.chat.id != MY_ID:
-        return
-
-    keyboard = telebot.types.InlineKeyboardMarkup()
-    buttons_in_row = 1
-    buttons_added = []
-
-    if message.text == "Issues on me":
-        issues, _, names = updater.issues_on_me()
-        if not names:
-            bot.send_message(MY_ID, text="Nothing!")
-        else:
-            for issue, issue_name in zip(issues, names):
-                buttons_added.append(
-                    telebot.types.InlineKeyboardButton(
-                        f"{issue}: {issue_name}", url=f"https://jira.ozon.ru/browse/{issue}",
-                    )
-                )
-                if len(buttons_added) == buttons_in_row:
-                    keyboard.add(*buttons_added)
-                    buttons_added = []
-            bot.send_message(MY_ID, text="Issues on me:", reply_markup=keyboard)
-
-    elif message.text == "-":
-        answer = hlink("/start", "/start")
-        bot.send_message(
-            MY_ID,
-            f"Click start to open again: {answer}",
-            parse_mode="HTML",
-            reply_markup=types.ReplyKeyboardRemove(),
-        )
-        updater._toggle_main_loop(False)
-
-    elif message.text == "Updates":
-        issues, _, names = updater.search_updates()
-        if not issues:
-            bot.send_message(MY_ID, text="Nothing!")
-        else:
-            for issue, issue_name in zip(issues, names):
-                buttons_added.append(
-                    telebot.types.InlineKeyboardButton(
-                        f"{issue}: {issue_name}", url=f"https://jira.ozon.ru/browse/{issue}",
-                    )
-                )
-                if len(buttons_added) == buttons_in_row:
-                    keyboard.add(*buttons_added)
-                    buttons_added = []
-            bot.send_message(MY_ID, text="Last updates:", reply_markup=keyboard)
-
-
-# start background processing (preserve old behaviour)
-updater.start()
+            interval = self.config.get("polling.time_check_interval", 300) if self.config else 300
+            time.sleep(interval)

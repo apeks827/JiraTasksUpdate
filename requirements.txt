@@ -1,0 +1,23 @@
+# JiraTasksUpdate Dependencies
+
+# Jira client
+jira==3.13.0
+
+# Telegram bot
+pyTelegramBotAPI==4.14.0
+aiogram==3.0.0
+
+# Configuration
+PyYAML==6.0
+python-dotenv==1.0.0
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+
+# Code quality
+black==23.12.1
+flake8==6.1.0
+ruff==0.1.10
+mypy==1.7.1
