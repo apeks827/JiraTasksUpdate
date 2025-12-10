@@ -1,4 +1,17 @@
-"""Main JiraTasksUpdate module with automated Jira task processing and Telegram notifications."""
+"""Основной модуль JiraTasksUpdate.
+
+Содержит класс JiraTaskUpdater, который отвечает за:
+- поиск новых задач в Jira по JQL
+- применение правил фильтрации (skip)
+- назначение задач исполнителям (ротация)
+- отправку уведомлений в Telegram
+- отслеживание обновлений по watched задачам
+- time-based контроль работы (сон/пробуждение)
+- кэширование уже обработанных задач
+
+Класс спроектирован так, чтобы быть конфигурируемым через объект Config
+и при желании использоваться без Telegram (bot = None).
+"""
 
 import logging
 import threading
@@ -16,7 +29,12 @@ logger = logging.getLogger(__name__)
 
 
 class JiraTaskUpdater:
-    """Main class for automated Jira task processing."""
+    """Основной класс для автоматизированной обработки задач Jira.
+
+    Взаимодействует с Jira через jira-python, а с пользователем — через Telegram-бота
+    (если он передан). Весь state (флаги, кэш, списки skip) хранится в полях класса,
+    что упрощает тестирование и сопровождение.
+    """
 
     def __init__(
         self,
@@ -27,15 +45,15 @@ class JiraTaskUpdater:
         config=None,
         dry_run: bool = False,
     ):
-        """Initialize JiraTaskUpdater.
+        """Инициализация JiraTaskUpdater.
 
         Args:
-            jira_client: JIRA client instance.
-            bot: Telegram bot instance (can be None).
-            my_id: Primary user Telegram ID.
-            vovan_id: Secondary user Telegram ID.
-            config: Config object for settings (optional).
-            dry_run: If True, no actual changes are made.
+            jira_client: Инициализированный клиент Jira
+            bot: Экземпляр Telegram-бота (может быть None для режима без Telegram)
+            my_id: Telegram ID основного пользователя (владельца)
+            vovan_id: Telegram ID второго пользователя (для ротации)
+            config: Объект Config с настройками (может быть None для дефолтов)
+            dry_run: Если True — не вносить реальные изменения в Jira (только логировать)
         """
         self.jira = jira_client
         self.bot = bot
@@ -44,21 +62,28 @@ class JiraTaskUpdater:
         self.config = config
         self.dry_run = dry_run
 
-        # State flags
+        # Флаги состояния работы основного цикла и time-контроля
         self.running_main_loop = True
         self.running_by_time = True
+        # Индекс в списке исполнителей для ротации
         self.to_assign = 0
 
-        # Skip rules
+        # Правила пропуска задач и параметры времени загружаем из конфигурации, если она есть
         if config:
+            # Точные ключи задач, которые никогда не обрабатываются
             self.to_skip = config.get_skip_issue_keys().copy()
+            # Ключевые слова в комментариях
             self.skip_comment_keywords = config.get_skip_comment_keywords()
+            # Ключевые слова в названии задачи
             self.skip_name_keywords = config.get_skip_name_keywords()
+            # Создатели, чьи задачи пропускаем
             self.skip_creators = config.get_skip_creators()
+            # Часы сна
             self.sleep_hours = config.get_sleep_hours()
+            # Список исполнителей для ротации (username, chat_id)
             self.assignees = config.get_assignees()
         else:
-            # Fallback to hardcoded defaults
+            # Фоллбек на жёстко заданные значения, если конфигурация не передана
             self.to_skip = {"SD911-2689821"}
             self.skip_comment_keywords = {"isuvorinov", "alpechenin", "vivashov", "asmolensky", "otitov"}
             self.skip_name_keywords = {"пропуск", "скуд", "возврат", "предостав", "ноутбук"}
@@ -66,32 +91,40 @@ class JiraTaskUpdater:
             self.sleep_hours = {23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
             self.assignees = [("sergmakarov", 105517177), ("vivashov", 1823360851)]
 
-        # Counters for self-reset
+        # Счётчики вызовов циклов для защиты от возможных бесконечных рекурсий/рестартов
         self.main_loop_call_count = 0
         self.search_updates_call_count = 0
 
-        # Cache for processed issues (prevent duplicate notifications)
+        # Кэш обработанных задач (чтобы не отправлять уведомления по одной и той же задаче слишком часто)
         self.processed_issues_cache = set()
+        # Словарь ключ задачи -> время истечения кэша
         self.cache_expiry = {}
 
-        # Threads
+        # Потоки для различных задач
         self.thread_main_loop = threading.Thread(target=self.loop, name="main_loop", daemon=True)
         self.thread_check_updates = threading.Thread(target=self.search_updates_timeout, name="updates_loop", daemon=True)
         self.thread_tg_bot = threading.Thread(target=self._telegram_polling, name="tg_bot", daemon=True)
         self.thread_time_loop = threading.Thread(target=self.check_time, name="time_loop", daemon=True)
 
     def _telegram_polling(self) -> None:
-        """Run Telegram bot polling."""
+        """Запуск polling цикла Telegram-бота.
+
+        Вынесено в отдельный метод, чтобы основной код мог работать и без Telegram
+        (если bot = None), и чтобы можно было легко обработать исключения.
+        """
         if self.bot:
             try:
                 self.bot.infinity_polling()
             except Exception as e:  # noqa: BLE001
                 logger.exception("Telegram polling error: %s", e)
 
-    # --- public API ---
+    # --- Публичный API ---
 
     def start(self) -> None:
-        """Start all background threads."""
+        """Запустить все фоновые потоки.
+
+        Учитывает feature-тогглы в конфигурации, если они заданы.
+        """
         logger.info("Starting JiraTaskUpdater threads")
         if self.config and not self.config.is_feature_enabled("main_loop"):
             logger.info("Main loop is disabled in config")
@@ -114,16 +147,19 @@ class JiraTaskUpdater:
             self.thread_time_loop.start()
 
     def stop(self) -> None:
-        """Signal threads to stop gracefully."""
+        """Остановить работу (установить флаги остановки).
+
+        Потоки завершаются мягко, опираясь на флаги состояния.
+        """
         logger.info("Stopping JiraTaskUpdater")
         self.running_main_loop = False
         self.running_by_time = False
 
     def process_once(self) -> None:
-        """Process issues once and return (useful for cron jobs).
+        """Одноразовая обработка задач (режим для cron).
 
-        This is a synchronous, single-run mode that processes new issues and updates
-        without starting any background threads.
+        Выполняет один цикл обработки новых задач и обновлений без запуска
+        фоновых потоков и без бесконечного цикла.
         """
         logger.info("Processing issues once (cron mode)")
         try:
@@ -136,18 +172,33 @@ class JiraTaskUpdater:
         except Exception as e:  # noqa: BLE001
             logger.exception("Error processing updates: %s", e)
 
-    # --- internal helpers ---
+    # --- Внутренние вспомогательные методы ---
 
     def _toggle_main_loop(self, value: bool) -> None:
+        """Включить/выключить основной цикл.
+
+        Используется, в том числе, из Telegram-команд.
+        """
         self.running_main_loop = value
         logger.info("Set running_main_loop=%s", value)
 
     def _toggle_by_time(self, value: bool) -> None:
+        """Включить/выключить работу по времени.
+
+        Когда флаг False — основной цикл не будет крутиться.
+        """
         self.running_by_time = value
         logger.info("Set running_by_time=%s", value)
 
     def _is_cached(self, issue_key: str) -> bool:
-        """Check if issue is in cache and not expired."""
+        """Проверить, находится ли задача в кэше и не истёк ли её TTL.
+
+        Args:
+            issue_key: Ключ задачи (например, 'SD911-12345')
+
+        Returns:
+            True если задача присутствует в кэше и TTL ещё не истёк, иначе False
+        """
         if issue_key not in self.processed_issues_cache:
             return False
 
@@ -155,24 +206,34 @@ class JiraTaskUpdater:
         if expiry and time.time() < expiry:
             return True
 
-        # Cache expired, remove it
+        # TTL истёк — очищаем из кэша
         self.processed_issues_cache.discard(issue_key)
         self.cache_expiry.pop(issue_key, None)
         return False
 
     def _cache_issue(self, issue_key: str, ttl_seconds: int = 3600) -> None:
-        """Add issue to cache with TTL (time to live)."""
+        """Добавить задачу в кэш с указанным временем жизни.
+
+        Args:
+            issue_key: Ключ задачи
+            ttl_seconds: Время жизни кэша в секундах
+        """
         self.processed_issues_cache.add(issue_key)
         self.cache_expiry[issue_key] = time.time() + ttl_seconds
         logger.debug("Cached issue %s for %d seconds", issue_key, ttl_seconds)
 
-    # --- core Jira polling logic ---
+    # --- Основной цикл обработки новых задач ---
 
     def loop(self) -> None:
-        """Main polling loop for new unassigned issues."""
+        """Основной цикл поллинга новых задач.
+
+        Периодически вызывает `_process_new_issues_batch()`, учитывая
+        флаги `running_main_loop` и `running_by_time`.
+        """
         self.main_loop_call_count += 1
 
-        if self.main_loop_call_count > (self.config.get("polling.max_call_count", 10) if self.config else 10):
+        max_calls = self.config.get("polling.max_call_count", 10) if self.config else 10
+        if self.main_loop_call_count > max_calls:
             logger.warning("main_loop call count exceeded, reset")
             self.main_loop_call_count = 0
             Timer(5, self.loop).start()
@@ -196,10 +257,11 @@ class JiraTaskUpdater:
                 Timer(restart_delay, self.loop).start()
 
     def _process_new_issues_batch(self) -> None:
-        """Fetch and process batch of new unassigned issues."""
+        """Получить и обработать партию новых неназначенных задач."""
         logger.info("Start searching new issues...")
 
         try:
+            # JQL берём из конфигурации, если задан, иначе используем дефолт
             jql = self.config.get("jira_search.new_issues_jql") if self.config else None
             if not jql:
                 jql = (
@@ -220,14 +282,19 @@ class JiraTaskUpdater:
             logger.exception("Error fetching new issues: %s", e)
 
     def _process_new_issue(self, issue) -> None:
-        """Process a single new issue: check skip conditions, assign if needed."""
+        """Обработать одну новую задачу: применить фильтры и при необходимости назначить.
+
+        Args:
+            issue: Объект задачи Jira
+        """
         true_issue = str(issue)
 
-        # Check cache and skip list
+        # Проверка на статический skip-лист
         if true_issue in self.to_skip:
             logger.info("Issue %s in permanent skip list", true_issue)
             return
 
+        # Проверка кэша (чтобы не обрабатывать одну и ту же задачу слишком часто)
         if self._is_cached(true_issue):
             logger.debug("Issue %s in cache, skip", true_issue)
             return
@@ -240,13 +307,14 @@ class JiraTaskUpdater:
 
         logger.info("Processing: %s | name: %s | creator: %s", issue, issue_name, issue_creator)
 
-        # Check comment keywords
+        # --- Фильтрация по комментариям ---
         if any(name in comments for name in self.skip_comment_keywords):
             logger.info("Skip %s: comment condition matched", issue)
+            # Кладём в кэш надолго, чтобы не проверять каждый раз
             self._cache_issue(true_issue)
             return
 
-        # Check name and creator conditions
+        # --- Фильтрация по названию и создателю ---
         if (
             any(word in issue_name.lower() for word in self.skip_name_keywords)
             or issue_creator in self.skip_creators
@@ -255,22 +323,32 @@ class JiraTaskUpdater:
             self._cache_issue(true_issue)
             return
 
-        # Assign issue
+        # --- Задача прошла фильтры => пытаемся назначить ---
         self._assign_issue(issue, issue_creator, issue_name)
-        self._cache_issue(true_issue, ttl_seconds=300)  # Cache for 5 minutes
+        # Кэшируем на короткий срок, чтобы не дергать задачу многократно подряд
+        self._cache_issue(true_issue, ttl_seconds=300)
 
     def _assign_issue(self, issue, creator: str, name: str) -> None:
-        """Transition issue status and assign to next user in rotation."""
+        """Перевести задачу в статус "В работе" и назначить исполнителя.
+
+        Исполнители выбираются по ротации из self.assignees.
+
+        Args:
+            issue: Объект задачи Jira
+            creator: Имя создателя задачи
+            name: Название задачи
+        """
         try:
             transition_id = self.config.get("assignee.transition_id", "21") if self.config else "21"
 
+            # Переход статуса (если не dry_run)
             if not self.dry_run:
                 self.jira.transition_issue(issue, transition_id)
                 logger.info("Transitioned %s to status 'In Progress'", issue)
             else:
                 logger.info("[DRY-RUN] Would transition %s to status 'In Progress'", issue)
 
-            # Get next assignee
+            # Выбор следующего исполнителя по ротации
             assignee_username, chat_id = self.assignees[self.to_assign]
             self.to_assign = (self.to_assign + 1) % len(self.assignees)
 
@@ -286,7 +364,7 @@ class JiraTaskUpdater:
             logger.exception("Error assigning issue %s: %s", issue, e)
 
     def _reassign_if_needed(self, issue, expected_assignee: str) -> None:
-        """Reassign issue if current assignee differs from expected."""
+        """Переназначить задачу на ожидаемого исполнителя, если нужно."""
         try:
             current_assignee = issue.raw["fields"].get("assignee")
             if current_assignee != expected_assignee:
@@ -296,16 +374,16 @@ class JiraTaskUpdater:
             logger.exception("Error reassigning issue: %s", e)
 
     def _safe_send_message(self, chat_id: int, issue, creator: str, name: str) -> None:
-        """Send Telegram message safely with error handling."""
+        """Отправить сообщение в Telegram с обработкой ошибок."""
         try:
             self.send_message(chat_id, issue, creator, name)
         except Exception as e:  # noqa: BLE001
             logger.exception("Error sending message: %s", e)
 
-    # --- updates watcher ---
+    # --- Вотчер обновлений задач ---
 
     def search_updates_timeout(self) -> None:
-        """Periodic watcher for updated issues."""
+        """Цикл отслеживания обновлений по watched задачам."""
         self.search_updates_call_count += 1
 
         max_count = self.config.get("polling.max_call_count", 10) if self.config else 10
@@ -329,7 +407,7 @@ class JiraTaskUpdater:
             Timer(restart_delay, self.search_updates_timeout).start()
 
     def _process_updates_batch(self) -> None:
-        """Fetch and process batch of watched issue updates."""
+        """Получить и обработать партию обновлённых задач."""
         logger.info("Start searching updates...")
 
         try:
@@ -361,16 +439,16 @@ class JiraTaskUpdater:
             logger.exception("Error fetching updates: %s", e)
 
     def _safe_send_message_updates(self, issue, creator: str, name: str) -> None:
-        """Send update notification safely."""
+        """Отправить уведомление об обновлении задачи с обработкой ошибок."""
         try:
             self.send_message_updates(issue, creator, name)
         except Exception as e:  # noqa: BLE001
             logger.exception("Error sending update message: %s", e)
 
-    # --- Jira helpers (get lists for Telegram commands) ---
+    # --- Jira helpers (для Telegram команд) ---
 
     def _get_list(self, issues_raw):
-        """Extract lists of (issues, creators, names) from Jira issues."""
+        """Преобразовать список Jira issues в 3 списка: ключи, создатели, названия."""
         issues = []
         creators = []
         names = []
@@ -382,7 +460,7 @@ class JiraTaskUpdater:
         return issues, creators, names
 
     def new_issues_ondesk(self):
-        """Get list of unassigned issues waiting for processing."""
+        """Получить список новых задач в статусе "Ожидает обработки" (для справки)."""
         jql = self.config.get("jira_search.new_issues_jql") if self.config else None
         if not jql:
             jql = (
@@ -393,7 +471,7 @@ class JiraTaskUpdater:
         return self._get_list(new_issues)
 
     def issues_on_me(self):
-        """Get list of my assigned issues."""
+        """Получить список задач, назначенных на текущего пользователя."""
         jql = self.config.get("jira_search.my_issues_jql") if self.config else None
         if not jql:
             jql = (
@@ -405,7 +483,7 @@ class JiraTaskUpdater:
         return self._get_list(raw)
 
     def search_updates(self):
-        """Get recent updates in watched issues."""
+        """Получить список недавних обновлений по watched задачам."""
         jql = self.config.get("jira_search.recent_updates_jql") if self.config else None
         if not jql:
             jql = (
@@ -418,7 +496,7 @@ class JiraTaskUpdater:
     # --- Telegram helpers ---
 
     def send_message(self, to_send_id: int, issue, creator: str, name: str) -> None:
-        """Send new issue notification to Telegram."""
+        """Отправить уведомление о новой задаче в Telegram."""
         if not self.bot:
             logger.warning("Telegram bot not initialized, cannot send message")
             return
@@ -434,7 +512,7 @@ class JiraTaskUpdater:
             raise
 
     def send_message_updates(self, issue, creator: str, name: str) -> None:
-        """Send update notification to Telegram."""
+        """Отправить уведомление об обновлении задачи в Telegram."""
         if not self.bot:
             logger.warning("Telegram bot not initialized, cannot send message")
             return
@@ -448,10 +526,14 @@ class JiraTaskUpdater:
             logger.exception("Error sending update message: %s", e)
             raise
 
-    # --- time-based control ---
+    # --- Контроль работы по времени ---
 
     def check_time(self) -> None:
-        """Monitor current time and toggle sleep/wake mode."""
+        """Отслеживать текущее время и переключать sleep/wake режимы.
+
+        Использует список sleep_hours и wake_up_hour из конфигурации,
+        чтобы не обрабатывать задачи ночью/в нерабочее время.
+        """
         flag = False
 
         while True:
@@ -467,8 +549,10 @@ class JiraTaskUpdater:
                 if current_time.hour == wake_up_hour and not flag:
                     flag = True
                     self._toggle_by_time(False)
+                    # Небольшая задержка перед стартом
                     time.sleep(11)
                     self._toggle_by_time(True)
+                    # Запускаем основной цикл
                     self.loop()
 
             interval = self.config.get("polling.time_check_interval", 300) if self.config else 300
