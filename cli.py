@@ -1,4 +1,9 @@
-"""Command-line interface for JiraTasksUpdate."""
+"""CLI (командный интерфейс) для JiraTasksUpdate.
+
+Этот модуль позволяет запускать бота из командной строки с различными
+режимами: обычный запуск, dry-run, единичный прогон (cron), отключение
+Telegram и time-контроля и т.п.
+"""
 
 import argparse
 import logging
@@ -11,33 +16,30 @@ logger = logging.getLogger(__name__)
 
 
 def create_parser() -> argparse.ArgumentParser:
-    """Create CLI argument parser.
+    """Создать парсер аргументов командной строки.
 
     Returns:
-        Configured ArgumentParser instance.
+        Настроенный экземпляр ArgumentParser.
     """
     parser = argparse.ArgumentParser(
-        description="JiraTasksUpdate - Automated Jira task processor with Telegram notifications",
+        description="JiraTasksUpdate - Автоматизированный обработчик задач Jira с уведомлениями в Telegram",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Run with default config
+Примеры:
+  # Запуск с конфигом по умолчанию
   python cli.py
   
-  # Run in dry-run mode (no actual assignments)
+  # Сухой прогон (без реальных назначений и уведомлений)
   python cli.py --dry-run
   
-  # Run once and exit (cron mode)
+  # Одноразовый запуск и выход (режим cron)
   python cli.py --once
   
-  # Run with debug logging
+  # Запуск с уровнем логирования DEBUG
   python cli.py --log-level DEBUG
   
-  # Custom config file
+  # Использовать кастомный конфиг-файл
   python cli.py --config my_config.yaml
-  
-  # Run specific project
-  python cli.py --project TSK
         """,
     )
 
@@ -45,7 +47,7 @@ Examples:
         "--config",
         type=str,
         default="config.yaml",
-        help="Path to configuration file (default: config.yaml)",
+        help="Путь к файлу конфигурации (по умолчанию: config.yaml)",
     )
 
     parser.add_argument(
@@ -53,38 +55,38 @@ Examples:
         type=str,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default=None,
-        help="Override logging level from config",
+        help="Переопределить уровень логирования из config.yaml",
     )
 
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run without making actual changes (no Jira updates, no TG messages)",
+        help="Запуск без реальных изменений (без переходов статусов и отправки сообщений)",
     )
 
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Process issues once and exit (useful for cron)",
+        help="Обработать задачи один раз и завершиться (подходит для cron)",
     )
 
     parser.add_argument(
         "--no-telegram",
         action="store_true",
-        help="Disable Telegram bot notifications",
+        help="Отключить отправку уведомлений в Telegram",
     )
 
     parser.add_argument(
         "--no-time-control",
         action="store_true",
-        help="Disable sleep/wake time control (run 24/7)",
+        help="Отключить контроль по времени (бот работает 24/7)",
     )
 
     parser.add_argument(
         "--interval",
         type=int,
         default=None,
-        help="Override polling interval (in seconds) for new issues",
+        help="Переопределить интервал поллинга новых задач (в секундах)",
     )
 
     parser.add_argument(
@@ -97,31 +99,31 @@ Examples:
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    """Parse command-line arguments.
+    """Распарсить аргументы командной строки.
 
     Args:
-        argv: Command-line arguments (defaults to sys.argv[1:]).
+        argv: Список аргументов (по умолчанию sys.argv[1:]).
 
     Returns:
-        Parsed arguments namespace.
+        Пространство имён с распарсенными аргументами.
     """
     parser = create_parser()
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """Main entry point for CLI.
+    """Основная точка входа CLI.
 
     Args:
-        argv: Command-line arguments (defaults to sys.argv[1:]).
+        argv: Список аргументов (по умолчанию sys.argv[1:]).
 
     Returns:
-        Exit code (0 for success, 1 for error).
+        Код выхода (0 при успехе, 1 при ошибке).
     """
     args = parse_args(argv)
 
     try:
-        # Load configuration
+        # Загружаем конфигурацию
         config = Config(args.config)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -130,10 +132,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Error loading config: {e}", file=sys.stderr)
         return 1
 
-    # Setup logging
+    # Настраиваем логирование
     if args.log_level:
-        # Override config logging level
-        config.data["logging"]["level"] = args.log_level
+        # Переопределяем уровень логирования из конфигурации
+        config.data.setdefault("logging", {})["level"] = args.log_level
 
     setup_logging(config)
 
@@ -142,15 +144,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger.info("CLI arguments: %s", args)
 
     if args.dry_run:
-        logger.warning("DRY-RUN MODE: No actual changes will be made")
+        logger.warning("DRY-RUN MODE: реальных изменений производиться не будет")
 
-    # Import here to avoid circular imports
+    # Импортируем здесь, чтобы избежать циклических импортов
     from test import JiraTaskUpdater
     from jira.client import JIRA
     import telebot
 
     try:
-        # Initialize Jira client
+        # Инициализируем Jira-клиент
         jira_token = config.get_jira_token()
         jira = JIRA(server=config.get("jira.server"), token_auth=jira_token)
         logger.info("Jira client initialized")
@@ -162,7 +164,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     try:
-        # Initialize Telegram bot
+        # Инициализируем Telegram-бота (если не отключен флагом)
         if not args.no_telegram:
             tg_token = config.get_tg_token()
             bot = telebot.TeleBot(tg_token)
@@ -177,11 +179,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.exception("Error initializing Telegram bot: %s", e)
         return 1
 
-    # Get user IDs
+    # Получаем ID пользователей из конфигурации
     main_id = config.get("telegram.users.main_id", 105517177)
     vovan_id = config.get("telegram.users.secondary_id", 1823360851)
 
-    # Create updater
+    # Создаём экземпляр JiraTaskUpdater
     updater = JiraTaskUpdater(
         jira_client=jira,
         bot=bot,
@@ -193,17 +195,17 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         if args.once:
-            # Run once and exit (cron mode)
+            # Режим однократного прогона (cron)
             logger.info("Running in ONCE mode (cron)")
             updater.process_once()
             logger.info("Done. Exiting.")
             return 0
         else:
-            # Normal mode: start background threads
+            # Обычный режим: запускаем фоновые потоки
             logger.info("Starting background threads")
             updater.start()
 
-            # Keep main thread alive
+            # Держим главный поток живым, пока не придёт Ctrl+C
             import time
             try:
                 while True:

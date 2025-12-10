@@ -1,6 +1,7 @@
-"""Legacy entry point for backward compatibility.
+"""Легаси-точка входа для обратной совместимости.
 
-Prefers config.yaml if available, falls back to old hardcoded setup.
+Если есть config.yaml — пытается использовать его. Если нет —
+падает обратно на старую схему с dist.secrets и базовым логированием.
 """
 
 import logging
@@ -11,13 +12,13 @@ from pathlib import Path
 try:
     from config import Config, setup_logging
 except ImportError:
-    logging.error("config.py not found. Please ensure config.py is in the same directory.")
+    logging.error("config.py не найден. Убедитесь, что config.py лежит рядом с main.py.")
     sys.exit(1)
 
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
-    # Try to load config.yaml
+    # Пытаемся загрузить config.yaml
     config_path = "config.yaml"
     config = None
 
@@ -25,25 +26,25 @@ if __name__ == "__main__":
         try:
             config = Config(config_path)
             setup_logging(config)
-            logger.info("Loaded configuration from %s", config_path)
+            logger.info("Конфигурация загружена из %s", config_path)
         except Exception as e:  # noqa: BLE001
-            logger.error("Error loading config: %s", e)
+            logger.error("Ошибка при загрузке конфигурации: %s", e)
             sys.exit(1)
     else:
-        # Fallback: setup basic logging
+        # Фоллбек: базовая настройка логирования
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         )
-        logger.warning("config.yaml not found, using fallback setup")
+        logger.warning("config.yaml не найден, используется fallback-настройка")
 
-    # Import here to avoid circular imports
+    # Импортируем здесь, чтобы избежать циклических импортов
     from test import JiraTaskUpdater
     from jira.client import JIRA
     import telebot
     from dist import secrets
 
-    # Initialize clients
+    # Инициализируем клиенты Jira и Telegram
     try:
         if config:
             jira_token = config.get_jira_token()
@@ -52,7 +53,7 @@ if __name__ == "__main__":
             my_id = config.get("telegram.users.main_id", 105517177)
             vovan_id = config.get("telegram.users.secondary_id", 1823360851)
         else:
-            # Fallback to secrets module
+            # Фоллбек на модуль secrets (старый способ)
             jira_token = secrets.api
             tg_token = secrets.tg
             jira_server = "https://jira.o3.ru"
@@ -62,12 +63,12 @@ if __name__ == "__main__":
         jira = JIRA(server=jira_server, token_auth=jira_token)
         bot = telebot.TeleBot(tg_token)
 
-        logger.info("Clients initialized successfully")
+        logger.info("Клиенты Jira и Telegram успешно инициализированы")
     except Exception as e:  # noqa: BLE001
-        logger.exception("Error initializing clients: %s", e)
+        logger.exception("Ошибка инициализации клиентов: %s", e)
         sys.exit(1)
 
-    # Create and start updater
+    # Создаём и запускаем updater
     updater = JiraTaskUpdater(
         jira_client=jira,
         bot=bot,
@@ -79,11 +80,11 @@ if __name__ == "__main__":
     logger.info("Starting JiraTasksUpdate...")
     updater.start()
 
-    # Keep main thread alive
+    # Держим главный поток живым, пока не придёт Ctrl+C
     import time
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Received KeyboardInterrupt, stopping...")
+        logger.info("Получен KeyboardInterrupt, останавливаемся...")
         updater.stop()
